@@ -166,31 +166,24 @@ class OfflineSyncEngine {
     } finally {
       this.isCheckingHealth = false;
     }
-          if (!matchedQueue) continue;
+  }
 
-          if (resItem.success) {
-            await indexedDbService.removeQueueItem(matchedQueue.id);
-            pushedCount++;
+  public async checkConnectivityAndAutoSync(triggerSource: string = 'manual'): Promise<void> {
+    const isReachable = await this.pingBackend();
+    if (isReachable) {
+      const pending = await indexedDbService.getPendingSyncQueue().catch(() => []);
+      if (pending.length > 0) {
+        await this.syncNow();
+      } else {
+        this.syncState = 'SYNCED';
+        this.broadcastStatus(0);
+      }
+    } else {
+      this.setOfflineState(`Connectivity check failed from ${triggerSource}`);
+    }
+  }
 
-            if (matchedQueue.entity === 'swine') {
-              const localSwine = await indexedDbService.get<SwineRecord>('swineRecords', matchedQueue.entityId);
-              if (localSwine) {
-                const updatedLocal = {
-                  ...localSwine,
-                  id: resItem.serverEntityId || localSwine.id,
-                  pigIdTag: resItem.serverPigId || localSwine.pigIdTag,
-                  earTagNo: resItem.serverPigId || localSwine.earTagNo,
-                  isSynced: true,
-                };
-                if (resItem.serverEntityId && resItem.serverEntityId !== matchedQueue.entityId) {
-                  await indexedDbService.delete('swineRecords', matchedQueue.entityId);
-                }
-                await indexedDbService.put('swineRecords', updatedLocal);
-   */
   public async syncNow(): Promise<{ success: boolean; pushedCount: number; pulledCount: number; error?: string }> {
-          } else {
-            await indexedDbService.updateQueueItemStatus(matchedQueue.id, 'FAILED', resItem.error);
-            pushError ||= resItem.error || 'Database rejected a queued operation.';
     if (this.isSyncInProgress) {
       return { success: false, pushedCount: 0, pulledCount: 0, error: 'Sync already in progress' };
     }
@@ -356,6 +349,7 @@ class OfflineSyncEngine {
       if (Array.isArray(messages)) {
         await indexedDbService.putBatch('messages', messages);
       }
+
       // -------------------------------------------------------------
       // STEP 3: UPDATE METADATA & COMPLETE
       // -------------------------------------------------------------
@@ -392,7 +386,6 @@ class OfflineSyncEngine {
   // =========================================================================
 
   public async queueSwineCreate(record: SwineRecord): Promise<void> {
-    // 1. Save directly into local IndexedDB
     const localRecord: SwineRecord = {
       ...record,
       isSynced: false,
@@ -400,10 +393,8 @@ class OfflineSyncEngine {
     };
     await indexedDbService.put('swineRecords', localRecord);
 
-    // 2. Add to persistent queue
     await indexedDbService.enqueueSyncItem('create', 'swine', localRecord.id, localRecord, 2);
 
-    // 3. Update memory mirror
     const currentList = storageService.getSwineRecords();
     const updated = [localRecord, ...currentList.filter(s => s.id !== localRecord.id)];
     storageService.saveSwineRecords(updated);
@@ -412,7 +403,6 @@ class OfflineSyncEngine {
       window.dispatchEvent(new CustomEvent('swine_records_updated', { detail: updated }));
     }
 
-    // 4. Try auto-sync in background if online
     this.checkConnectivityAndAutoSync('swine_create');
   }
 
