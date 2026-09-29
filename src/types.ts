@@ -834,7 +834,7 @@ export interface SwineImportHistoryRecord {
   id: string;
   batchId: string;
   fileName: string;
-  fileType: 'csv' | 'xlsx' | 'xls' | 'tsv' | 'api' | 'manual';
+  fileType: 'csv' | 'json' | 'xlsx' | 'xls' | 'tsv' | 'api' | 'manual';
   fileSize: number;
   importedBy: string;
   importedByRole?: string;

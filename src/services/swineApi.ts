@@ -34,6 +34,8 @@ function getAuthHeaders(): Record<string, string> {
 
   try {
     const user = storageService.getCurrentUser();
+    const token = storageService.getSessionToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
     if (user) {
       headers['x-user-role'] = user.role || 'focal';
       headers['x-user-id'] = user.id || '';

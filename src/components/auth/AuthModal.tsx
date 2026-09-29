@@ -6,16 +6,13 @@ import {
   EyeOff,
   X,
   AlertCircle,
-  WifiOff,
   ArrowRight,
   ShieldCheck,
-  MapPin,
-  Sparkles,
 } from 'lucide-react';
 import { UserAccount, UserRole } from '../../types';
+import { authApi } from '../../services/api';
 import { storageService } from '../../services/storageService';
 import { useOfficialLogos } from '../common/OfficialSeals';
-import { supabase } from '../../lib/supabase';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -43,23 +40,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     const checkConnection = async () => {
       try {
-        if (!supabase) {
-          throw new Error('Supabase client is not configured');
-        }
-
-        const timeout = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('Database timeout')), 4000);
-        });
-
-        const sessionPromise = supabase.auth.getSession();
-        const { error: sessionError } = await Promise.race([sessionPromise, timeout]);
-        if (sessionError) throw sessionError;
-
-        const { error: queryError } = await Promise.race([
-          supabase.from('barangays').select('id', { count: 'exact', head: true }).limit(1),
-          timeout,
-        ]);
-        if (queryError) throw queryError;
+        const response = await fetch('/api/health');
+        const health = await response.json();
+        if (!response.ok || health.database !== 'connected') throw new Error('Database unavailable');
 
         if (isMounted) setDbConnectionStatus('connected');
       } catch {
@@ -83,110 +66,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleQuickFill = (u: string, p: string) => {
-    setUsernameOrEmail(u);
-    setPassword(p);
-    setErrorMsg('');
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
     setIsLoading(true);
-
-    setTimeout(() => {
-      const q = usernameOrEmail.trim().toLowerCase();
-      const pwd = password.trim();
-
-      const accounts = storageService.getAccounts();
-
-      // Find matching account by username or email
-      const matched = accounts.find(
-        a =>
-          a.username.toLowerCase() === q ||
-          a.email.toLowerCase() === q
-      );
-
-      if (q === 'admin' && (pwd === 'admin' || pwd === 'admin123')) {
-        const fallbackAdmin: UserAccount = {
-          id: 'usr-admin-1',
-          username: 'admin',
-          name: 'Engr. Arnel M. Vasquez (MAO)',
-          email: 'admin@hinunangan.da.gov.ph',
-          role: 'admin',
-          createdAt: new Date().toISOString(),
-        };
-        storageService.setCurrentUser(fallbackAdmin);
-        onLoginSuccess(fallbackAdmin);
-        setIsLoading(false);
-        return;
-      }
-
-      if (q === 'focal_poblacion' && (pwd === 'password123' || pwd === 'admin')) {
-        const fallbackFocal: UserAccount = {
-          id: 'usr-focal-poblacion',
-          username: 'focal_poblacion',
-          name: 'Maria L. Santos',
-          fullName: 'Maria L. Santos (Barangay Poblacion Focal Officer)',
-          email: 'poblacion.focal@hinunangan.da.gov.ph',
-          role: 'focal',
-          assignedBarangay: 'Poblacion',
-          createdAt: new Date().toISOString(),
-        };
-        storageService.setCurrentUser(fallbackFocal);
-        onLoginSuccess(fallbackFocal);
-        setIsLoading(false);
-        return;
-      }
-
-      if (q === 'agent_hinunangan' && (pwd === 'password123' || pwd === 'admin')) {
-        const fallbackAgent: UserAccount = {
-          id: 'usr-agent-1',
-          username: 'agent_hinunangan',
-          name: 'Ricardo S. Mercado',
-          fullName: 'Ricardo S. Mercado (Livestock Trader)',
-          email: 'agent@hinunangan.da.gov.ph',
-          role: 'agent',
-          createdAt: new Date().toISOString(),
-        };
-        storageService.setCurrentUser(fallbackAgent);
-        onLoginSuccess(fallbackAgent);
-        setIsLoading(false);
-        return;
-      }
-
-      if (!matched) {
-        setErrorMsg('No registered account found with this username or official email.');
-        setIsLoading(false);
-        return;
-      }
-
-      if (matched.role === 'super_admin') {
+    try {
+      const result = await authApi.login(usernameOrEmail.trim(), password);
+      if (result.role === 'super_admin') {
+        storageService.setSessionToken(null);
         setErrorMsg('Super Admin accounts must sign in through the dedicated /superadmin route.');
-        setIsLoading(false);
         return;
       }
-
-      // Verify active status
-      if (matched.active === false) {
-        setErrorMsg('This account has been deactivated by the Municipal Agriculture Office.');
-        setIsLoading(false);
-        return;
-      }
-
-      // Verify password
-      const validPasswords = [matched.password, 'admin', 'admin123', 'password123'].filter(Boolean);
-      if (matched.password && !validPasswords.includes(pwd)) {
-        setErrorMsg('Incorrect password. Please verify your credentials or contact the administrator.');
-        setIsLoading(false);
-        return;
-      }
-
-      // Successful authentication — Role is strictly derived from the account
-      storageService.setCurrentUser(matched);
-      onLoginSuccess(matched);
+      onLoginSuccess(result.user);
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Sign-in failed. Please try again.');
+    } finally {
       setIsLoading(false);
-    }, 250);
+    }
   };
 
   return (
@@ -215,7 +111,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   Official Portal
                 </span>
                 <span className="text-emerald-400/80 text-[11px] flex items-center gap-1 font-mono">
-                  <WifiOff className="w-3 h-3" /> Offline Auth Ready
+                  <ShieldCheck className="w-3 h-3" /> Database Sign-In
                 </span>
               </div>
               <h2 className="text-lg font-black tracking-tight text-white mt-1">
@@ -243,71 +139,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <span className="leading-snug">{errorMsg}</span>
             </div>
           )}
-
-          {/* Quick Demo Fill (1-Click) */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-black uppercase tracking-wider text-stone-500">
-                Quick Demo Fill (1-Click)
-              </span>
-              <span className="text-[10px] text-stone-400 font-semibold">
-                Pre-configured accounts
-              </span>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              {/* Admin */}
-              <button
-                type="button"
-                onClick={() => handleQuickFill('admin', 'admin')}
-                className={`p-2 rounded-xl border text-left transition cursor-pointer ${
-                  usernameOrEmail === 'admin'
-                    ? 'border-emerald-600 bg-emerald-50 text-emerald-950 font-bold shadow-2xs'
-                    : 'border-stone-200 hover:border-emerald-300 bg-stone-50/60 text-stone-700'
-                }`}
-              >
-                <div className="flex items-center gap-1 text-[11px] font-bold">
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                  <span>Admin</span>
-                </div>
-                <div className="text-[10px] text-stone-500 truncate mt-0.5">MAO Vasquez</div>
-              </button>
-
-              {/* Focal Person */}
-              <button
-                type="button"
-                onClick={() => handleQuickFill('focal_poblacion', 'password123')}
-                className={`p-2 rounded-xl border text-left transition cursor-pointer ${
-                  usernameOrEmail === 'focal_poblacion'
-                    ? 'border-blue-600 bg-blue-50 text-blue-950 font-bold shadow-2xs'
-                    : 'border-stone-200 hover:border-blue-300 bg-stone-50/60 text-stone-700'
-                }`}
-              >
-                <div className="flex items-center gap-1 text-[11px] font-bold">
-                  <MapPin className="w-3.5 h-3.5 text-blue-700 shrink-0" />
-                  <span>Focal (Pob)</span>
-                </div>
-                <div className="text-[10px] text-stone-500 truncate mt-0.5">Santos, M.</div>
-              </button>
-
-              {/* Agent */}
-              <button
-                type="button"
-                onClick={() => handleQuickFill('agent_hinunangan', 'password123')}
-                className={`p-2 rounded-xl border text-left transition cursor-pointer ${
-                  usernameOrEmail === 'agent_hinunangan'
-                    ? 'border-amber-600 bg-amber-50 text-amber-950 font-bold shadow-2xs'
-                    : 'border-stone-200 hover:border-amber-300 bg-stone-50/60 text-stone-700'
-                }`}
-              >
-                <div className="flex items-center gap-1 text-[11px] font-bold">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                  <span>Agent / Buyer</span>
-                </div>
-                <div className="text-[10px] text-stone-500 truncate mt-0.5">Mercado, R.</div>
-              </button>
-            </div>
-          </div>
 
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-4">

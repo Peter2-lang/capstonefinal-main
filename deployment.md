@@ -92,6 +92,7 @@ In Vercel dashboard, go to Project → Settings → Environment Variables and ad
 
 ```bash
 DATABASE_URL=postgresql://postgres:[YOUR_PASSWORD]@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?sslmode=require
+SESSION_SECRET=[OUTPUT_OF_openssl_rand_-hex_32]
 SQL_SSL=true
 NODE_ENV=production
 VITE_SUPABASE_URL=https://[PROJECT_REF].supabase.co
@@ -101,6 +102,7 @@ VITE_GOOGLE_MAPS_MAP_ID=DEMO_MAP_ID
 ```
 
 This project already reads the main database connection from `DATABASE_URL` in [src/db/index.ts](src/db/index.ts).
+`SESSION_SECRET` signs 12-hour bearer sessions used by swine-record, schema, and synchronization APIs. Generate it with `openssl rand -hex 32`, then set the same high-entropy value for Production, Preview, and Development so sessions work across serverless instances. Do not commit the secret.
 
 ---
 
@@ -110,6 +112,7 @@ Create a local file named `.env.local` from the example in [.env.example](.env.e
 
 ```bash
 DATABASE_URL=postgresql://postgres:[YOUR_PASSWORD]@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?sslmode=require
+SESSION_SECRET=[GENERATE_WITH_openssl_rand_-hex_32]
 GEMINI_API_KEY=your_key_here
 NODE_ENV=development
 VITE_SUPABASE_URL=https://[PROJECT_REF].supabase.co

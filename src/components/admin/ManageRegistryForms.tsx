@@ -46,7 +46,7 @@ export const ManageRegistryForms: React.FC<ManageRegistryFormsProps> = ({ onRefr
     setValidationError('');
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!label.trim()) {
       setValidationError('Please enter a field label');
@@ -59,29 +59,34 @@ export const ManageRegistryForms: React.FC<ManageRegistryFormsProps> = ({ onRefr
         ? optionsStr.split(',').map(s => s.trim()).filter(Boolean)
         : undefined;
 
-    if (isAddingNew) {
-      const newField: DynamicFormField = {
-        id: 'dyn-' + Date.now(),
-        label: label.trim(),
-        type: fieldType,
-        section,
-        required,
-        options: opts,
-        placeholder: placeholder.trim() || undefined,
-        enabled: true,
-      };
-      storageService.saveDynamicField(newField);
-    } else if (editingField) {
-      const updated: DynamicFormField = {
-        ...editingField,
-        label: label.trim(),
-        type: fieldType,
-        section,
-        required,
-        options: opts,
-        placeholder: placeholder.trim() || undefined,
-      };
-      storageService.saveDynamicField(updated);
+    try {
+      if (isAddingNew) {
+        const newField: DynamicFormField = {
+          id: 'dyn-' + Date.now(),
+          label: label.trim(),
+          type: fieldType,
+          section,
+          required,
+          options: opts,
+          placeholder: placeholder.trim() || undefined,
+          enabled: true,
+        };
+        await storageService.saveDynamicField(newField);
+      } else if (editingField) {
+        const updated: DynamicFormField = {
+          ...editingField,
+          label: label.trim(),
+          type: fieldType,
+          section,
+          required,
+          options: opts,
+          placeholder: placeholder.trim() || undefined,
+        };
+        await storageService.saveDynamicField(updated);
+      }
+    } catch (error) {
+      setValidationError(error instanceof Error ? error.message : 'Unable to save the field to the database.');
+      return;
     }
 
     setFields(storageService.getDynamicFields());
@@ -94,12 +99,16 @@ export const ManageRegistryForms: React.FC<ManageRegistryFormsProps> = ({ onRefr
     setDeleteTarget({ id, lbl });
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (!deleteTarget) return;
-    storageService.deleteDynamicField(deleteTarget.id);
-    setFields(storageService.getDynamicFields());
-    setDeleteTarget(null);
-    onRefresh();
+    try {
+      await storageService.deleteDynamicField(deleteTarget.id);
+      setFields(storageService.getDynamicFields());
+      setDeleteTarget(null);
+      onRefresh();
+    } catch (error) {
+      setValidationError(error instanceof Error ? error.message : 'Unable to delete the field from the database.');
+    }
   };
 
   const farmerFields = fields.filter(f => f.section === 'farmer');

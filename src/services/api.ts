@@ -18,6 +18,8 @@ function getAuthHeaders(): Record<string, string> {
 
   try {
     const user = storageService.getCurrentUser();
+    const token = storageService.getSessionToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
     if (user) {
       headers['x-user-role'] = user.role || 'focal';
       headers['x-user-id'] = user.id || '';
@@ -37,7 +39,7 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 export const authApi = {
-  async login(username: string, password: string): Promise<{ user: UserAccount; role: string; assignedBarangay?: string }> {
+  async login(username: string, password: string): Promise<{ user: UserAccount; role: string; assignedBarangay?: string; token: string }> {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -48,7 +50,17 @@ export const authApi = {
     if (!res.ok || !data.success) {
       throw new Error(data.error || 'Invalid credentials or login failed.');
     }
-    return { user: data.user, role: data.role, assignedBarangay: data.assignedBarangay };
+    if (!data.token || typeof data.token !== 'string') {
+      throw new Error('Authentication service returned no session token.');
+    }
+    storageService.setSessionToken(data.token);
+    try {
+      await storageService.refreshRegistryFormSchemaFromCloud();
+    } catch (error) {
+      storageService.setSessionToken(null);
+      throw error;
+    }
+    return { user: data.user, role: data.role, assignedBarangay: data.assignedBarangay, token: data.token };
   },
 };
 

@@ -52,7 +52,7 @@ export const SuperAdminAuth: React.FC<SuperAdminAuthProps> = ({
         return;
       }
 
-      storageService.setCurrentUser(result.user);
+      storageService.setCurrentUser(result.user, true);
       onSuccess(result.user);
     } catch (error) {
       setErrorMsg(error instanceof Error ? error.message : 'Invalid Super Administrator credentials. Access Denied.');

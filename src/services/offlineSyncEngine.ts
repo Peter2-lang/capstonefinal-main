@@ -166,31 +166,31 @@ class OfflineSyncEngine {
     } finally {
       this.isCheckingHealth = false;
     }
-  }
+          if (!matchedQueue) continue;
 
-  /**
-   * Auto-trigger sync safely when condition allows
-   */
-  public async checkConnectivityAndAutoSync(triggerReason?: string): Promise<void> {
-    if (this.isSyncInProgress) return;
+          if (resItem.success) {
+            await indexedDbService.removeQueueItem(matchedQueue.id);
+            pushedCount++;
 
-    const isReachable = await this.pingBackend();
-    if (!isReachable) {
-      this.setOfflineState(`Backend unreachable (${triggerReason})`);
-      return;
-    }
-
-    // Backend is reachable! Trigger sync
-    await this.syncNow();
-  }
-
-  /**
-   * Complete 2-Way Sync Engine:
-   * 1. Flush offline pending queue (PUSH) to backend
-   * 2. Download latest authoritative server state (PULL)
-   * 3. Reconcile IndexedDB & memory caches
+            if (matchedQueue.entity === 'swine') {
+              const localSwine = await indexedDbService.get<SwineRecord>('swineRecords', matchedQueue.entityId);
+              if (localSwine) {
+                const updatedLocal = {
+                  ...localSwine,
+                  id: resItem.serverEntityId || localSwine.id,
+                  pigIdTag: resItem.serverPigId || localSwine.pigIdTag,
+                  earTagNo: resItem.serverPigId || localSwine.earTagNo,
+                  isSynced: true,
+                };
+                if (resItem.serverEntityId && resItem.serverEntityId !== matchedQueue.entityId) {
+                  await indexedDbService.delete('swineRecords', matchedQueue.entityId);
+                }
+                await indexedDbService.put('swineRecords', updatedLocal);
    */
   public async syncNow(): Promise<{ success: boolean; pushedCount: number; pulledCount: number; error?: string }> {
+          } else {
+            await indexedDbService.updateQueueItemStatus(matchedQueue.id, 'FAILED', resItem.error);
+            pushError ||= resItem.error || 'Database rejected a queued operation.';
     if (this.isSyncInProgress) {
       return { success: false, pushedCount: 0, pulledCount: 0, error: 'Sync already in progress' };
     }
@@ -220,6 +220,8 @@ class OfflineSyncEngine {
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
         };
+        const sessionToken = storageService.getSessionToken();
+        if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
         if (user) {
           headers['x-user-role'] = user.role || 'focal';
           headers['x-user-id'] = user.id || '';
@@ -244,41 +246,51 @@ class OfflineSyncEngine {
           body: JSON.stringify(pushPayload),
         });
 
-        if (pushRes.ok) {
-          const pushData = await pushRes.json();
-          if (pushData.results && Array.isArray(pushData.results)) {
-            for (const resItem of pushData.results) {
-              const matchedQueue = pendingQueue.find(q => q.clientOperationId === resItem.clientOperationId);
-              if (matchedQueue) {
-                if (resItem.success) {
-                  // Mark synced and delete from queue
-                  await indexedDbService.removeQueueItem(matchedQueue.id);
-                  pushedCount++;
+        if (!pushRes.ok) {
+          const failure = await pushRes.json().catch(() => null);
+          throw new Error(failure?.error || `Database rejected sync push (HTTP ${pushRes.status}).`);
+        }
+        const pushData = await pushRes.json();
+        if (!pushData.success || !Array.isArray(pushData.results)) {
+          throw new Error('Database returned an invalid sync-push response.');
+        }
+        const acknowledgedIds = new Set(pushData.results.map((item: any) => item.clientOperationId));
+        if (acknowledgedIds.size !== pendingQueue.length ||
+            pendingQueue.some(item => !acknowledgedIds.has(item.clientOperationId))) {
+          throw new Error('Database did not acknowledge every queued operation.');
+        }
+        let pushError: string | null = null;
+        for (const resItem of pushData.results) {
+          const matchedQueue = pendingQueue.find(q => q.clientOperationId === resItem.clientOperationId);
+          if (!matchedQueue) continue;
 
-                  // If server assigned new Pig ID or new Entity ID, update local store
-                  if (matchedQueue.entity === 'swine') {
-                    const localSwine = await indexedDbService.get<SwineRecord>('swineRecords', matchedQueue.entityId);
-                    if (localSwine) {
-                      const updatedLocal = {
-                        ...localSwine,
-                        id: resItem.serverEntityId || localSwine.id,
-                        pigIdTag: resItem.serverPigId || localSwine.pigIdTag,
-                        earTagNo: resItem.serverPigId || localSwine.earTagNo,
-                        isSynced: true,
-                      };
-                      if (resItem.serverEntityId && resItem.serverEntityId !== matchedQueue.entityId) {
-                        await indexedDbService.delete('swineRecords', matchedQueue.entityId);
-                      }
-                      await indexedDbService.put('swineRecords', updatedLocal);
-                    }
-                  }
-                } else {
-                  await indexedDbService.updateQueueItemStatus(matchedQueue.id, 'FAILED', resItem.error);
-                }
+          if (!resItem.success) {
+            await indexedDbService.updateQueueItemStatus(matchedQueue.id, 'FAILED', resItem.error);
+            pushError ||= resItem.error || 'Database rejected a queued operation.';
+            continue;
+          }
+
+          await indexedDbService.removeQueueItem(matchedQueue.id);
+          pushedCount++;
+
+          if (matchedQueue.entity === 'swine') {
+            const localSwine = await indexedDbService.get<SwineRecord>('swineRecords', matchedQueue.entityId);
+            if (localSwine) {
+              const updatedLocal = {
+                ...localSwine,
+                id: resItem.serverEntityId || localSwine.id,
+                pigIdTag: resItem.serverPigId || localSwine.pigIdTag,
+                earTagNo: resItem.serverPigId || localSwine.earTagNo,
+                isSynced: true,
+              };
+              if (resItem.serverEntityId && resItem.serverEntityId !== matchedQueue.entityId) {
+                await indexedDbService.delete('swineRecords', matchedQueue.entityId);
               }
+              await indexedDbService.put('swineRecords', updatedLocal);
             }
           }
         }
+        if (pushError) throw new Error(pushError);
       }
 
       // -------------------------------------------------------------
@@ -286,6 +298,8 @@ class OfflineSyncEngine {
       // -------------------------------------------------------------
       const user = storageService.getCurrentUser();
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const sessionToken = storageService.getSessionToken();
+      if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
       if (user) {
         headers['x-user-role'] = user.role || 'focal';
         headers['x-user-id'] = user.id || '';
@@ -295,56 +309,53 @@ class OfflineSyncEngine {
       }
 
       const pullRes = await fetch('/api/sync/pull', { method: 'GET', headers });
-      if (pullRes.ok) {
-        const pullData = await pullRes.json();
-        if (pullData.success && pullData.data) {
-          const { swineRecords, certificates, messages } = pullData.data;
-
-          // Merge Swine Records safely (Preserve any locally created pending records)
-          if (Array.isArray(swineRecords)) {
-            pulledCount = swineRecords.length;
-            const remainingQueue = await indexedDbService.getPendingSyncQueue();
-            const pendingSwineIds = new Set(
-              remainingQueue.filter(q => q.entity === 'swine').map(q => q.entityId)
-            );
-
-            // Fetch existing local records
-            const localRecords = await indexedDbService.getAll<SwineRecord>('swineRecords');
-            const pendingLocalRecords = localRecords.filter(r => pendingSwineIds.has(r.id) || !r.isSynced);
-
-            // Server records are authoritative
-            const serverMarked = swineRecords.map((s: SwineRecord) => ({ ...s, isSynced: true }));
-
-            // Merge server records + local pending records
-            const mergedMap = new Map<string, SwineRecord>();
-            serverMarked.forEach((s: SwineRecord) => mergedMap.set(s.id, s));
-            pendingLocalRecords.forEach((s: SwineRecord) => mergedMap.set(s.id, s));
-
-            const finalMergedList = Array.from(mergedMap.values()).sort(
-              (a, b) => new Date(b.registeredAt || 0).getTime() - new Date(a.registeredAt || 0).getTime()
-            );
-
-            // Update IndexedDB
-            await indexedDbService.clear('swineRecords');
-            await indexedDbService.putBatch('swineRecords', finalMergedList);
-
-            // Sync to storageService memory/localStorage mirror
-            storageService.saveSwineRecords(finalMergedList);
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('swine_records_updated', { detail: finalMergedList }));
-            }
-          }
-
-          // Update certificates & messages in IndexedDB
-          if (Array.isArray(certificates)) {
-            await indexedDbService.putBatch('certificates', certificates);
-          }
-          if (Array.isArray(messages)) {
-            await indexedDbService.putBatch('messages', messages);
-          }
-        }
+      if (!pullRes.ok) {
+        const failure = await pullRes.json().catch(() => null);
+        throw new Error(failure?.error || `Database rejected sync pull (HTTP ${pullRes.status}).`);
+      }
+      const pullData = await pullRes.json();
+      if (!pullData.success || !pullData.data) {
+        throw new Error(pullData.error || 'Database returned an invalid sync-pull response.');
+      }
+      const { swineRecords, certificates, messages } = pullData.data;
+      if (!Array.isArray(swineRecords)) {
+        throw new Error('Database returned no authoritative swine-record list.');
       }
 
+      // Merge server state with local records that still have unacknowledged operations.
+      pulledCount = swineRecords.length;
+      const remainingQueue = await indexedDbService.getPendingSyncQueue();
+      const pendingSwineIds = new Set(
+        remainingQueue.filter(q => q.entity === 'swine').map(q => q.entityId)
+      );
+
+      const localRecords = await indexedDbService.getAll<SwineRecord>('swineRecords');
+      const pendingLocalRecords = localRecords.filter(r => pendingSwineIds.has(r.id) || !r.isSynced);
+
+      const serverMarked = swineRecords.map((s: SwineRecord) => ({ ...s, isSynced: true }));
+
+      const mergedMap = new Map<string, SwineRecord>();
+      serverMarked.forEach((s: SwineRecord) => mergedMap.set(s.id, s));
+      pendingLocalRecords.forEach((s: SwineRecord) => mergedMap.set(s.id, s));
+
+      const finalMergedList = Array.from(mergedMap.values()).sort(
+        (a, b) => new Date(b.registeredAt || 0).getTime() - new Date(a.registeredAt || 0).getTime()
+      );
+
+      await indexedDbService.clear('swineRecords');
+      await indexedDbService.putBatch('swineRecords', finalMergedList);
+
+      storageService.saveSwineRecords(finalMergedList);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('swine_records_updated', { detail: finalMergedList }));
+      }
+
+      if (Array.isArray(certificates)) {
+        await indexedDbService.putBatch('certificates', certificates);
+      }
+      if (Array.isArray(messages)) {
+        await indexedDbService.putBatch('messages', messages);
+      }
       // -------------------------------------------------------------
       // STEP 3: UPDATE METADATA & COMPLETE
       // -------------------------------------------------------------

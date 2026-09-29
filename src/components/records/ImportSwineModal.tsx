@@ -191,34 +191,51 @@ export const ImportSwineModal: React.FC<ImportSwineModalProps> = ({
     cf => !cf.required && !mappedTargetKeys.has(cf.key)
   );
 
-  // Handle File Upload & Parsing (XLSX, XLS, CSV)
+  // Handle File Upload & Parsing (JSON, XLSX, XLS, CSV)
   const handleFileUpload = async (selectedFile: File) => {
     setFile(selectedFile);
     setIsReadingFile(true);
     setFileReadError(null);
 
     try {
-      const data = await selectedFile.arrayBuffer();
-      const workbook = XLSX.read(data, { type: 'array', cellDates: true, cellNF: false, cellText: false });
+      let jsonData: Record<string, any>[];
+      if (selectedFile.name.toLowerCase().endsWith('.json')) {
+        const parsed = JSON.parse(await selectedFile.text());
+        const inputRows = Array.isArray(parsed) ? parsed : parsed?.records ?? parsed?.data;
+        if (!Array.isArray(inputRows)) {
+          throw new Error('JSON must contain an array of records or a records/data array property.');
+        }
+        jsonData = inputRows
+          .filter(row => row && typeof row === 'object' && !Array.isArray(row))
+          .map(row => {
+            const { customFields, ...coreFields } = row;
+            return customFields && typeof customFields === 'object' && !Array.isArray(customFields)
+              ? { ...coreFields, ...customFields }
+              : coreFields;
+          });
+      } else {
+        const data = await selectedFile.arrayBuffer();
+        const workbook = XLSX.read(data, { type: 'array', cellDates: true, cellNF: false, cellText: false });
 
-      const firstSheetName = workbook.SheetNames[0];
-      if (!firstSheetName) {
-        throw new Error('Spreadsheet does not contain any readable sheets.');
+        const firstSheetName = workbook.SheetNames[0];
+        if (!firstSheetName) {
+          throw new Error('Spreadsheet does not contain any readable sheets.');
+        }
+
+        const worksheet = workbook.Sheets[firstSheetName];
+        jsonData = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, {
+          raw: false,
+          defval: '',
+          dateNF: 'yyyy-mm-dd',
+        });
       }
-
-      const worksheet = workbook.Sheets[firstSheetName];
-      const jsonData = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, {
-        raw: false,
-        defval: '',
-        dateNF: 'yyyy-mm-dd',
-      });
 
       if (!jsonData || jsonData.length === 0) {
         throw new Error('Spreadsheet appears to be empty or has no data rows below the header.');
       }
 
       // Extract headers from worksheet range or object keys
-      const headers = Object.keys(jsonData[0]);
+      const headers = Array.from(new Set(jsonData.flatMap(row => Object.keys(row))));
       if (headers.length === 0) {
         throw new Error('Could not identify a valid header row in the file.');
       }
@@ -499,7 +516,7 @@ export const ImportSwineModal: React.FC<ImportSwineModalProps> = ({
         });
 
         // Save schema to local storage & backend
-        storageService.saveRegistryFormSchema(updatedSchema);
+        await storageService.saveRegistryFormSchema(updatedSchema);
       }
 
       setImportProgress(35);
@@ -579,6 +596,9 @@ export const ImportSwineModal: React.FC<ImportSwineModalProps> = ({
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            ...(storageService.getSessionToken()
+              ? { Authorization: `Bearer ${storageService.getSessionToken()}` }
+              : {}),
             'x-user-role': currentUser?.role || 'admin',
             'x-user-id': currentUser?.id || 'admin',
             'x-user-name': currentUser?.name || 'Administrator',
@@ -586,7 +606,7 @@ export const ImportSwineModal: React.FC<ImportSwineModalProps> = ({
           body: JSON.stringify({
             records: recordsToImport,
             fileName: file?.name || 'Import.xlsx',
-            fileType: file?.name.endsWith('.csv') ? 'csv' : 'xlsx',
+            fileType: file?.name.toLowerCase().endsWith('.json') ? 'json' : file?.name.toLowerCase().endsWith('.csv') ? 'csv' : 'xlsx',
             fileSize: file?.size || 0,
             duplicateHandling,
             newFieldsCreated: newFieldMappings.map(m => m.targetFieldKey),
@@ -614,7 +634,7 @@ export const ImportSwineModal: React.FC<ImportSwineModalProps> = ({
         id: `imp-hist-${Date.now()}`,
         batchId,
         fileName: file?.name || 'Swine_Import.xlsx',
-        fileType: file?.name.endsWith('.csv') ? 'csv' : 'xlsx',
+        fileType: file?.name.toLowerCase().endsWith('.json') ? 'json' : file?.name.toLowerCase().endsWith('.csv') ? 'csv' : 'xlsx',
         fileSize: file?.size || 0,
         importedBy: currentUser?.name || 'System Administrator',
         importedByRole: currentUser?.role || 'admin',
@@ -833,7 +853,7 @@ export const ImportSwineModal: React.FC<ImportSwineModalProps> = ({
                       ? '.csv'
                       : initialFileType === 'xlsx'
                       ? '.xlsx,.xls'
-                      : '.xlsx,.xls,.csv'
+                      : '.xlsx,.xls,.csv,.json'
                   }
                   className="hidden"
                 />

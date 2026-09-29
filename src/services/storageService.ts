@@ -61,6 +61,7 @@ const STORAGE_KEYS = {
   DYNAMIC_FORM: 'da_hinunangan_dynamic_form_v1',
   OFFLINE_QUEUE: 'da_hinunangan_offline_queue_v1',
   CURRENT_USER: 'da_hinunangan_current_user_v1',
+  SESSION_TOKEN: 'da_hinunangan_session_token_v1',
   SIMULATED_OFFLINE: 'da_hinunangan_simulated_offline_v1',
   BIOSECURITY_AUDITS: 'da_hinunangan_biosecurity_audits_v1',
   BIOSECURITY_INCIDENTS: 'da_hinunangan_biosecurity_incidents_v1',
@@ -91,6 +92,11 @@ function setItem<T>(key: string, value: T): void {
   } catch (err) {
     console.error(`Error writing localStorage key "${key}":`, err);
   }
+}
+
+function getSessionAuthorizationHeader(): Record<string, string> {
+  const token = getItem<string | null>(STORAGE_KEYS.SESSION_TOKEN, null);
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 // Auto-empty records one-time migration to ensure browser session clears data records while preserving all text
@@ -252,6 +258,7 @@ export const storageService = {
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        ...getSessionAuthorizationHeader(),
       };
 
       const user = this.getCurrentUser();
@@ -375,7 +382,7 @@ export const storageService = {
 
     if (!isOffline && typeof fetch !== 'undefined') {
       const user = this.getCurrentUser();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', ...getSessionAuthorizationHeader() };
       if (user) {
         headers['x-user-role'] = user.role || 'focal';
         headers['x-user-id'] = user.id || '';
@@ -484,13 +491,10 @@ export const storageService = {
   async deleteSwineRecordCloud(id: string): Promise<boolean> {
     const isOffline = this.isEffectiveOffline();
     if (!isOffline && typeof fetch !== 'undefined') {
-      const user = this.getCurrentUser();
       const res = await fetch(`/api/swine/${encodeURIComponent(id)}`, {
         method: 'DELETE',
         headers: {
-          'x-user-role': user?.role || 'admin',
-          'x-user-name': user?.name || 'Administrator',
-          'x-user-id': user?.id || 'admin',
+          ...getSessionAuthorizationHeader(),
         },
       });
       if (!res.ok) {
@@ -530,14 +534,11 @@ export const storageService = {
     if (!ids || ids.length === 0) return true;
     const isOffline = this.isEffectiveOffline();
     if (!isOffline && typeof fetch !== 'undefined') {
-      const user = this.getCurrentUser();
       const res = await fetch('/api/swine/bulk-delete', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': user?.role || 'admin',
-          'x-user-name': user?.name || 'Administrator',
-          'x-user-id': user?.id || 'admin',
+          ...getSessionAuthorizationHeader(),
         },
         body: JSON.stringify({ ids }),
       });
@@ -593,14 +594,11 @@ export const storageService = {
         });
       });
     } else {
-      const user = this.getCurrentUser();
       fetch('/api/swine/bulk-delete', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': user?.role || 'admin',
-          'x-user-name': user?.name || 'Administrator',
-          'x-user-id': user?.id || 'admin',
+          ...getSessionAuthorizationHeader(),
         },
         body: JSON.stringify({ ids }),
       }).catch(err => console.warn('Cloud SQL bulk delete sync notice:', err));
@@ -790,8 +788,21 @@ export const storageService = {
     return getItem<UserAccount | null>(STORAGE_KEYS.CURRENT_USER, null);
   },
 
-  setCurrentUser(user: UserAccount | null): void {
+  setCurrentUser(user: UserAccount | null, preserveSessionToken = false): void {
+    const previousUser = this.getCurrentUser();
+    if (user && previousUser?.id !== user.id && !preserveSessionToken) {
+      setItem(STORAGE_KEYS.SESSION_TOKEN, null);
+    }
     setItem(STORAGE_KEYS.CURRENT_USER, user);
+    if (!user) setItem(STORAGE_KEYS.SESSION_TOKEN, null);
+  },
+
+  getSessionToken(): string | null {
+    return getItem<string | null>(STORAGE_KEYS.SESSION_TOKEN, null);
+  },
+
+  setSessionToken(token: string | null): void {
+    setItem(STORAGE_KEYS.SESSION_TOKEN, token);
   },
 
   // Messages
@@ -1267,7 +1278,7 @@ Prepared for regional trade accreditation and ASF Green Zone maintenance.`,
     setItem(STORAGE_KEYS.DYNAMIC_FORM, fields);
   },
 
-  saveDynamicField(field: DynamicFormField): void {
+  async saveDynamicField(field: DynamicFormField): Promise<void> {
     const list = this.getDynamicFields();
     const idx = list.findIndex(f => f.id === field.id);
     if (idx >= 0) {
@@ -1275,59 +1286,43 @@ Prepared for regional trade accreditation and ASF Green Zone maintenance.`,
     } else {
       list.push(field);
     }
-    this.saveDynamicFields(list);
-
-    // Also synchronize field directly into current RegistryFormSchema so both are in 100% sync
-    try {
-      const schema = this.getRegistryFormSchema();
-      const targetSecId = field.section === 'farmer' ? 'sec_farmer' : field.section === 'swine' ? 'sec_swine' : 'sec_biosecurity';
-      let sec = schema.sections.find(s => s.id === targetSecId);
-      if (!sec) {
-        sec = schema.sections[0];
-      }
-      if (sec) {
-        const regField: RegistryFormField = {
-          id: field.id,
-          fieldKey: field.id.replace(/^dyn-/, '').toLowerCase(),
-          label: field.label,
-          type: field.type === 'select' ? 'dropdown' : field.type === 'checkbox' ? 'checkbox' : field.type === 'number' ? 'number' : 'text',
-          placeholder: field.placeholder,
-          required: field.required,
-          visible: field.enabled !== false,
-          options: field.options,
-        };
-        const fIdx = sec.fields.findIndex(f => f.id === field.id);
-        if (fIdx >= 0) {
-          sec.fields[fIdx] = regField;
-        } else {
-          sec.fields.push(regField);
-        }
-        this.saveRegistryFormSchema(schema);
-      }
-    } catch {
-      // ignore
+    const schema = this.getRegistryFormSchema();
+    const targetSecId = field.section === 'farmer' ? 'sec_farmer' : field.section === 'swine' ? 'sec_swine' : 'sec_biosecurity';
+    const section = schema.sections.find(item => item.id === targetSecId) || schema.sections[0];
+    if (!section) throw new Error('Registry form has no section for this field.');
+    const regField: RegistryFormField = {
+      id: field.id,
+      fieldKey: field.id.replace(/^dyn-/, '').toLowerCase(),
+      label: field.label,
+      type: field.type === 'select' ? 'dropdown' : field.type === 'checkbox' ? 'checkbox' : field.type === 'number' ? 'number' : 'text',
+      placeholder: field.placeholder,
+      required: field.required,
+      visible: field.enabled !== false,
+      options: field.options,
+    };
+    const fieldIndex = section.fields.findIndex(item => item.id === field.id);
+    if (fieldIndex >= 0) {
+      section.fields[fieldIndex] = regField;
+    } else {
+      section.fields.push(regField);
     }
+    await this.saveRegistryFormSchema(schema);
+    this.saveDynamicFields(list);
   },
 
-  deleteDynamicField(id: string): void {
+  async deleteDynamicField(id: string): Promise<void> {
     const list = this.getDynamicFields().filter(f => f.id !== id);
-    this.saveDynamicFields(list);
-
-    // Also remove or hide from schema
-    try {
-      const schema = this.getRegistryFormSchema();
-      let changed = false;
-      schema.sections.forEach(sec => {
-        const initialLen = sec.fields.length;
-        sec.fields = sec.fields.filter(f => f.id !== id);
-        if (sec.fields.length !== initialLen) changed = true;
-      });
-      if (changed) {
-        this.saveRegistryFormSchema(schema);
-      }
-    } catch {
-      // ignore
+    const schema = this.getRegistryFormSchema();
+    let changed = false;
+    schema.sections.forEach(section => {
+      const initialLength = section.fields.length;
+      section.fields = section.fields.filter(field => field.id !== id);
+      if (section.fields.length !== initialLength) changed = true;
+    });
+    if (changed) {
+      await this.saveRegistryFormSchema(schema);
     }
+    this.saveDynamicFields(list);
   },
 
   // Offline Queue
@@ -1964,23 +1959,44 @@ Prepared for regional trade accreditation and ASF Green Zone maintenance.`,
     return stored;
   },
 
-  saveRegistryFormSchema(schema: RegistryFormSchema): void {
+  async saveRegistryFormSchema(schema: RegistryFormSchema): Promise<RegistryFormSchema> {
+    if (this.isEffectiveOffline()) {
+      throw new Error('Connect to the registry database before publishing form fields.');
+    }
     const published = {
       ...schema,
       isPublished: true,
       lastUpdated: new Date().toISOString(),
     };
-    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA, published);
-    // Also update draft to match published
-    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA_DRAFT, published);
-    window.dispatchEvent(new CustomEvent('da_registry_schema_change', { detail: published }));
-    if (typeof fetch !== 'undefined') {
-      fetch('/api/registry-schema', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(published),
-      }).catch(() => {});
+    const response = await fetch('/api/registry-schema', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getSessionAuthorizationHeader() },
+      body: JSON.stringify(published),
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok || !result?.success || !result.schema) {
+      throw new Error(result?.error || `Unable to publish registry form (HTTP ${response.status}).`);
     }
+    const savedSchema = result.schema as RegistryFormSchema;
+    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA, savedSchema);
+    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA_DRAFT, savedSchema);
+    window.dispatchEvent(new CustomEvent('da_registry_schema_change', { detail: savedSchema }));
+    return savedSchema;
+  },
+
+  async refreshRegistryFormSchemaFromCloud(): Promise<RegistryFormSchema> {
+    const response = await fetch('/api/registry-schema', {
+      headers: getSessionAuthorizationHeader(),
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok || !result?.success || !result.schema) {
+      throw new Error(result?.error || `Unable to load registry form from database (HTTP ${response.status}).`);
+    }
+    const schema = result.schema as RegistryFormSchema;
+    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA, schema);
+    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA_DRAFT, schema);
+    window.dispatchEvent(new CustomEvent('da_registry_schema_change', { detail: schema }));
+    return schema;
   },
 
   getRegistryFormDraft(): RegistryFormSchema {
@@ -1997,30 +2013,10 @@ Prepared for regional trade accreditation and ASF Green Zone maintenance.`,
       lastUpdated: new Date().toISOString(),
     };
     setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA_DRAFT, updated);
-    // Ensure the main form schema is synchronized immediately with latest admin customization settings
-    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA, updated);
-    window.dispatchEvent(new CustomEvent('da_registry_schema_change', { detail: updated }));
-    if (typeof fetch !== 'undefined') {
-      fetch('/api/registry-schema', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updated),
-      }).catch(() => {});
-    }
   },
 
-  resetRegistryFormSchema(): RegistryFormSchema {
-    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA, INITIAL_REGISTRY_FORM_SCHEMA);
-    setItem(STORAGE_KEYS.REGISTRY_FORM_SCHEMA_DRAFT, INITIAL_REGISTRY_FORM_SCHEMA);
-    window.dispatchEvent(new CustomEvent('da_registry_schema_change', { detail: INITIAL_REGISTRY_FORM_SCHEMA }));
-    if (typeof fetch !== 'undefined') {
-      fetch('/api/registry-schema', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(INITIAL_REGISTRY_FORM_SCHEMA),
-      }).catch(() => {});
-    }
-    return INITIAL_REGISTRY_FORM_SCHEMA;
+  async resetRegistryFormSchema(): Promise<RegistryFormSchema> {
+    return this.saveRegistryFormSchema(INITIAL_REGISTRY_FORM_SCHEMA);
   },
 
   // Backup and Restore

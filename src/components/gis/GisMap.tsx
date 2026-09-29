@@ -1376,7 +1376,7 @@ class GoogleMapErrorBoundary extends React.Component<GoogleMapErrorBoundaryProps
 }
 
 export const GisMap: React.FC<GisMapProps> = props => {
-  const [engine, setEngine] = useState<'google' | 'leaflet'>('google');
+  const [engine, setEngine] = useState<'google' | 'leaflet'>('leaflet');
 
   if (engine === 'google') {
     return (

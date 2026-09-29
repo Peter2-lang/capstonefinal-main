@@ -173,7 +173,7 @@ export default function App() {
       const { records } = await storageService.fetchSwineRecords();
       setSwineList(records);
     } catch {
-      setSwineList(storageService.getSwineRecords());
+      setSwineList(storageService.isEffectiveOffline() ? storageService.getSwineRecords() : []);
     }
 
     const msgs = storageService.getMessages();
@@ -208,6 +208,13 @@ export default function App() {
   useEffect(() => {
     refreshAllData();
   }, [currentRole, currentUser]);
+
+  useEffect(() => {
+    if (!currentUser || !storageService.getSessionToken()) return;
+    storageService.refreshRegistryFormSchemaFromCloud().catch(error => {
+      console.error('Unable to refresh registry schema from database:', error);
+    });
+  }, [currentUser]);
 
   useEffect(() => {
     const handleSwineUpdate = (e: Event) => {
@@ -383,7 +390,7 @@ export default function App() {
   const handleLoginSuccess = (user: UserAccount) => {
     setCurrentUser(user);
     setCurrentRole(user.role);
-    storageService.setCurrentUser(user);
+    storageService.setCurrentUser(user, true);
     setIsAuthModalOpen(false);
     if (user.role === 'super_admin') {
       navigateTo('/superadmin/dashboard');

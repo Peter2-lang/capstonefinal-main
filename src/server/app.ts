@@ -1,4 +1,5 @@
 import express from 'express';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { HINUNANGAN_BARANGAYS } from '../data/barangays.ts';
 import { ALL_ASF_REGULATIONS } from '../data/asfRegulationsData.ts';
 import {
@@ -32,6 +33,63 @@ import { isValidPhilippinePhoneNumber, normalizePhilippinePhoneNumber } from '..
 
 export function createApp() {
   const app = express();
+  const configuredSessionSecret = process.env.SESSION_SECRET?.trim();
+  const sessionSecret = configuredSessionSecret || (process.env.NODE_ENV === 'production' ? '' : randomBytes(32).toString('hex'));
+  const hasValidSessionSecret = sessionSecret.length >= 32;
+
+  type SessionUser = {
+    userId: string;
+    username: string;
+    name: string;
+    role: string;
+    assignedBarangay: string;
+    barangayId: string;
+    expiresAt: number;
+  };
+
+  const createSessionToken = (user: any): string => {
+    const payload: SessionUser = {
+      userId: String(user.uid || user.id),
+      username: String(user.username || user.email || ''),
+      name: String(user.name || user.fullName || user.username || ''),
+      role: String(user.role || 'focal'),
+      assignedBarangay: String(user.assignedBarangay || ''),
+      barangayId: String(user.barangay_id || user.barangayId || ''),
+      expiresAt: Date.now() + 12 * 60 * 60 * 1000,
+    };
+    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const signature = createHmac('sha256', sessionSecret).update(encodedPayload).digest('base64url');
+    return `${encodedPayload}.${signature}`;
+  };
+
+  const verifySessionToken = (token: string): SessionUser | null => {
+    if (!hasValidSessionSecret) return null;
+    const [encodedPayload, providedSignature, extra] = token.split('.');
+    if (!encodedPayload || !providedSignature || extra) return null;
+    const expectedSignature = createHmac('sha256', sessionSecret).update(encodedPayload).digest();
+    let receivedSignature: Buffer;
+    try {
+      receivedSignature = Buffer.from(providedSignature, 'base64url');
+    } catch {
+      return null;
+    }
+    if (receivedSignature.length !== expectedSignature.length || !timingSafeEqual(receivedSignature, expectedSignature)) return null;
+    try {
+      const user = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8')) as SessionUser;
+      const validRoles = ['super_admin', 'admin', 'focal', 'agent'];
+      return user.expiresAt > Date.now() && user.userId && validRoles.includes(user.role) ? user : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const uuidForSyncOperation = (operationId: string): string => {
+    const bytes = createHash('sha256').update(operationId).digest('hex').slice(0, 32).split('');
+    bytes[12] = '5';
+    bytes[16] = ((parseInt(bytes[16], 16) & 0x3) | 0x8).toString(16);
+    const hex = bytes.join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  };
 
   const getDatabaseErrorCode = (error: any): string | undefined => {
     const code = error?.code || error?.cause?.code;
@@ -83,6 +141,19 @@ export function createApp() {
   app.use(express.json({ limit: '30mb' }));
   app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 
+  app.use((req, res, next) => {
+    if (!/^\/api\/(?:swine(?:-records)?|sync|registry-schema)(?:\/|$)/.test(req.path) &&
+        !/^\/api\/admin\/registry-form-schema(?:\/|$)/.test(req.path)) return next();
+    const authorization = req.headers.authorization || '';
+    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const authenticatedUser = verifySessionToken(token);
+    if (!authenticatedUser) {
+      return res.status(401).json({ success: false, error: 'Authentication required. Please sign in again.' });
+    }
+    (req as any).authenticatedUser = authenticatedUser;
+    return next();
+  });
+
   app.get(['/health', '/api/health'], async (_req, res) => {
     let dbStatus = 'disconnected';
     let recordsCount = 0;
@@ -130,14 +201,17 @@ export function createApp() {
 
   // Helper to extract authenticated user security context
   function getUserSecurityContext(req: express.Request) {
-    const rawRole = (req.headers['x-user-role'] as string) || (req.query.role as string) || '';
+    const authorization = req.headers.authorization || '';
+    const bearerToken = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const authenticatedUser = ((req as any).authenticatedUser || verifySessionToken(bearerToken)) as SessionUser | null;
+    const rawRole = authenticatedUser?.role || (req.headers['x-user-role'] as string) || (req.query.role as string) || '';
     const role = (rawRole === 'super_admin' || rawRole === 'admin' || rawRole === 'focal' || rawRole === 'agent')
       ? rawRole
       : 'guest';
-    const barangayId = (req.headers['x-user-barangay-id'] as string) || (req.query.barangay_id as string) || '';
-    const assignedBarangay = (req.headers['x-user-assigned-barangay'] as string) || (req.query.assigned_barangay as string) || '';
-    const userId = (req.headers['x-user-id'] as string) || (req.query.user_id as string) || '';
-    const username = (req.headers['x-user-name'] as string) || (req.query.user_name as string) || (role === 'guest' ? 'Visitor' : 'User');
+    const barangayId = authenticatedUser?.barangayId || (req.headers['x-user-barangay-id'] as string) || (req.query.barangay_id as string) || '';
+    const assignedBarangay = authenticatedUser?.assignedBarangay || (req.headers['x-user-assigned-barangay'] as string) || (req.query.assigned_barangay as string) || '';
+    const userId = authenticatedUser?.userId || (req.headers['x-user-id'] as string) || (req.query.user_id as string) || '';
+    const username = authenticatedUser?.username || (req.headers['x-user-name'] as string) || (req.query.user_name as string) || (role === 'guest' ? 'Visitor' : 'User');
     const isSuperAdmin = role === 'super_admin';
     const isAdmin = role === 'admin' || role === 'super_admin';
     const isAgent = role === 'agent';
@@ -156,6 +230,9 @@ export function createApp() {
     if (!username || !password) {
       return res.status(400).json({ success: false, error: 'Username and password are required.' });
     }
+    if (!hasValidSessionSecret) {
+      return res.status(503).json({ success: false, error: 'Authentication is not configured. Set SESSION_SECRET on the server.' });
+    }
 
     try {
       const user = await getUserByUsernameOrEmail(username.trim());
@@ -163,8 +240,15 @@ export function createApp() {
         return res.status(401).json({ success: false, error: 'Invalid username or password.' });
       }
 
-      if (user.password && user.password !== password.trim()) {
+      if (user.active === false) {
+        return res.status(403).json({ success: false, error: 'This account has been deactivated.' });
+      }
+
+      if (!user.password || user.password !== password.trim()) {
         return res.status(401).json({ success: false, error: 'Invalid username or password.' });
+      }
+      if (!['super_admin', 'admin', 'focal', 'agent'].includes(user.role)) {
+        return res.status(403).json({ success: false, error: 'This account does not have an authorized application role.' });
       }
 
       const safeUser = { ...user };
@@ -173,6 +257,7 @@ export function createApp() {
       return res.json({
         success: true,
         user: safeUser,
+        token: createSessionToken(safeUser),
         role: safeUser.role,
         assignedBarangay: safeUser.assignedBarangay,
       });
@@ -325,6 +410,10 @@ export function createApp() {
     const page = req.query.page ? parseInt(req.query.page as string, 10) : undefined;
     const perPage = req.query.per_page || req.query.perPage ? parseInt((req.query.per_page || req.query.perPage) as string, 10) : undefined;
 
+    if (user.isFocal && !user.assignedBarangay) {
+      return res.status(403).json({ success: false, error: 'Your account must be assigned to a barangay to view records.' });
+    }
+
     // Security check: non-admins cannot query other barangays or 'all'
     if (!user.isAdmin && !user.isAgent) {
       if (
@@ -424,6 +513,9 @@ export function createApp() {
     if (user.isAgent) {
       return res.status(403).json({ success: false, error: 'Access Denied: Agent accounts are view-only.' });
     }
+    if (user.isFocal && !user.assignedBarangay) {
+      return res.status(403).json({ success: false, error: 'Your account must be assigned to a barangay before registering records.' });
+    }
 
     const record = req.body;
     if (!record || typeof record !== 'object') {
@@ -470,7 +562,7 @@ export function createApp() {
       }
     }
 
-    if (!user.isAdmin && user.assignedBarangay) {
+    if (user.isFocal) {
       if (record.barangay && record.barangay.trim().toLowerCase() !== user.assignedBarangay.trim().toLowerCase()) {
         return res.status(403).json({
           success: false,
@@ -527,6 +619,9 @@ export function createApp() {
     if (user.isAgent) {
       return res.status(403).json({ success: false, error: 'Access Denied: Agent accounts are view-only.' });
     }
+    if (user.isFocal && !user.assignedBarangay) {
+      return res.status(403).json({ success: false, error: 'Your account must be assigned to a barangay before updating records.' });
+    }
 
     const { id } = req.params;
     const record = req.body;
@@ -561,7 +656,7 @@ export function createApp() {
         return res.status(404).json({ success: false, error: 'Swine record not found.' });
       }
 
-      if (!user.isAdmin && user.assignedBarangay) {
+      if (user.isFocal) {
         if (existing.barangay && existing.barangay.trim().toLowerCase() !== user.assignedBarangay.trim().toLowerCase()) {
           return res.status(403).json({
             success: false,
@@ -694,9 +789,26 @@ export function createApp() {
     if (!Array.isArray(records) || records.length === 0) {
       return res.status(400).json({ success: false, error: 'No swine records provided for import.' });
     }
+    if (records.some((record: any) => !record || typeof record !== 'object' || Array.isArray(record))) {
+      return res.status(400).json({ success: false, error: 'Import records must be JSON objects.' });
+    }
+    if (user.isFocal && !user.assignedBarangay) {
+      return res.status(403).json({ success: false, error: 'Your account must be assigned to a barangay before importing records.' });
+    }
+    if (user.isFocal && records.some((record: any) => record.barangay &&
+      record.barangay.trim().toLowerCase() !== user.assignedBarangay.trim().toLowerCase())) {
+      return res.status(403).json({ success: false, error: 'Focal persons can only import records for their assigned barangay.' });
+    }
+    const scopedRecords = user.isFocal
+      ? records.map((record: any) => ({
+          ...record,
+          barangay: user.assignedBarangay,
+          barangay_id: user.barangayId || record.barangay_id,
+        }))
+      : records;
 
     try {
-      const savedRecords = await batchUpsertSwineRecords(records);
+      const savedRecords = await batchUpsertSwineRecords(scopedRecords);
 
       // Record audit history if system settings table is available
       try {
@@ -1572,12 +1684,15 @@ export function createApp() {
     try {
       const schema = await getFullRegistrySchemaFromDb();
       return res.json({ success: true, schema, data: schema });
-    } catch {
-      return res.json({ success: true, schema: INITIAL_REGISTRY_FORM_SCHEMA, data: INITIAL_REGISTRY_FORM_SCHEMA });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.message || 'Unable to load registry schema from database.' });
     }
   });
 
   app.post(['/api/admin/registry-form-schema', '/api/registry-schema'], async (req, res) => {
+    if (!getUserSecurityContext(req).isAdmin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can modify registry form fields.' });
+    }
     try {
       if (req.body && Array.isArray(req.body.sections)) {
         const schema = await syncFullRegistrySchemaToDb(req.body);
@@ -1597,6 +1712,9 @@ export function createApp() {
   });
 
   app.put(['/api/admin/registry-form-schema', '/api/registry-schema'], async (req, res) => {
+    if (!getUserSecurityContext(req).isAdmin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can modify registry form fields.' });
+    }
     try {
       const schema = await syncFullRegistrySchemaToDb(req.body);
       return res.json({ success: true, schema, data: schema });
@@ -1606,6 +1724,9 @@ export function createApp() {
   });
 
   app.put('/api/registry-schema/:id', async (req, res) => {
+    if (!getUserSecurityContext(req).isAdmin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can modify registry form fields.' });
+    }
     try {
       const { id } = req.params;
       const field = await upsertSchemaFieldInDb({ ...req.body, id });
@@ -1617,6 +1738,9 @@ export function createApp() {
   });
 
   app.delete('/api/registry-schema/:id', async (req, res) => {
+    if (!getUserSecurityContext(req).isAdmin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can modify registry form fields.' });
+    }
     try {
       const { id } = req.params;
       await deleteSchemaFieldFromDb(id);
@@ -1663,6 +1787,9 @@ export function createApp() {
   // PULL: Download latest server data respecting role-based authorization
   const handleSyncPull = async (req: express.Request, res: express.Response) => {
     const user = getUserSecurityContext(req);
+    if (user.isFocal && !user.assignedBarangay) {
+      return res.status(403).json({ success: false, error: 'Your account must be assigned to a barangay to synchronize records.' });
+    }
     const since = (req.query.since as string) || (req.body && req.body.since) || undefined;
     const effectiveBarangay = user.isAdmin ? undefined : (user.assignedBarangay || user.barangayId);
 
@@ -1743,8 +1870,20 @@ export function createApp() {
             });
             continue;
           }
+          if (user.isFocal && !user.assignedBarangay) {
+            results.push({ clientOperationId, entityId, success: false, error: 'Your account has no assigned barangay.' });
+            continue;
+          }
 
           if (operation === 'create') {
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+              results.push({ clientOperationId, entityId, success: false, error: 'Invalid swine record payload.' });
+              continue;
+            }
+            if (user.isFocal && payload.barangay && payload.barangay.trim().toLowerCase() !== user.assignedBarangay.toLowerCase()) {
+              results.push({ clientOperationId, entityId, success: false, error: 'Record is outside your assigned barangay.' });
+              continue;
+            }
             let tag = (payload.pigIdTag || payload.earTagNo || '').trim();
             // If temporary local tag, generate authoritative backend Pig ID
             if (!tag || tag.startsWith('LOCAL-') || !PIG_ID_TAG_REGEX.test(tag)) {
@@ -1753,16 +1892,14 @@ export function createApp() {
               tag = `HIN-${currentYear}-${String(total + 1).padStart(4, '0')}`;
             }
 
-            if (!user.isAdmin && user.assignedBarangay) {
+            if (user.isFocal) {
               payload.barangay = user.assignedBarangay;
               if (user.barangayId) payload.barangay_id = user.barangayId;
             }
 
             const cleanRecord = {
               ...payload,
-              id: entityId.startsWith('local-') || entityId.startsWith('swine-local-')
-                ? `swine-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
-                : entityId,
+              id: uuidForSyncOperation(String(clientOperationId || entityId)),
               pigIdTag: tag,
               earTagNo: tag,
               registeredBy: payload.registeredBy || user.username,
@@ -1777,7 +1914,19 @@ export function createApp() {
               success: true,
             });
           } else if (operation === 'update') {
-            const updated = await upsertSwineRecord(payload);
+            const existing = await getSwineRecordById(entityId);
+            if (!existing || (user.isFocal && existing.barangay.toLowerCase() !== user.assignedBarangay.toLowerCase()) ||
+                (user.isFocal && payload?.barangay && payload.barangay.toLowerCase() !== user.assignedBarangay.toLowerCase())) {
+              results.push({ clientOperationId, entityId, success: false, error: 'Record is outside your assigned barangay or no longer exists.' });
+              continue;
+            }
+            const updated = await upsertSwineRecord({
+              ...existing,
+              ...(payload || {}),
+              id: existing.id,
+              barangay: existing.barangay,
+              barangay_id: existing.barangay_id,
+            });
             results.push({
               clientOperationId,
               entityId,
@@ -1798,10 +1947,13 @@ export function createApp() {
             }
           } else if (operation === 'sell' || operation === 'archive') {
             const existing = await getSwineRecordById(entityId);
-            if (existing) {
+            if (existing && (!user.isFocal || existing.barangay.toLowerCase() === user.assignedBarangay.toLowerCase())) {
               const updated = {
                 ...existing,
                 ...payload,
+                id: existing.id,
+                barangay: existing.barangay,
+                barangay_id: existing.barangay_id,
               };
               await upsertSwineRecord(updated);
               results.push({ clientOperationId, entityId, success: true });

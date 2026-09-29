@@ -181,14 +181,16 @@ export const RegistryFormCustomizer: React.FC<RegistryFormCustomizerProps> = ({
   };
 
   // Synchronize any updates immediately with the actual Swine Registry Form configuration
-  const updateSchemaAndSync = (newSchema: RegistryFormSchema, message?: string) => {
-    setSchema(newSchema);
-    storageService.saveRegistryFormSchema(newSchema);
-    storageService.saveRegistryFormDraft(newSchema);
-    if (message) {
-      showToast(message);
+  const updateSchemaAndSync = async (newSchema: RegistryFormSchema, message?: string) => {
+    try {
+      const savedSchema = await storageService.saveRegistryFormSchema(newSchema);
+      storageService.saveRegistryFormDraft(savedSchema);
+      setSchema(savedSchema);
+      if (message) showToast(message);
+      if (onRefresh) onRefresh();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to save registry form to the database.');
     }
-    if (onRefresh) onRefresh();
   };
 
   const activeSection = schema.sections.find(s => s.id === activeSectionId) || schema.sections[0];
@@ -544,31 +546,45 @@ export const RegistryFormCustomizer: React.FC<RegistryFormCustomizerProps> = ({
   };
 
   // Save Draft
-  const handleSaveDraft = () => {
-    storageService.saveRegistryFormDraft(schema);
-    storageService.saveRegistryFormSchema(schema);
-    showToast('✓ Form customization saved and synced with Swine Registry Form');
-    if (onRefresh) onRefresh();
+  const handleSaveDraft = async () => {
+    try {
+      const savedSchema = await storageService.saveRegistryFormSchema(schema);
+      storageService.saveRegistryFormDraft(savedSchema);
+      setSchema(savedSchema);
+      showToast('Form customization saved and synced with Swine Registry Form.');
+      if (onRefresh) onRefresh();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to save registry form to the database.');
+    }
   };
 
   // Reset to Default Form
-  const handleResetDefault = () => {
+  const handleResetDefault = async () => {
     if (window.confirm('Reset all registration form fields to official DA default template?')) {
-      const reset = storageService.resetRegistryFormSchema();
-      setSchema(reset);
-      setActiveSectionId(reset.sections[0]?.id || 'sec_farm');
-      showToast('Form reset to official DA Hinunangan default schema');
-      if (onRefresh) onRefresh();
+      try {
+        const reset = await storageService.resetRegistryFormSchema();
+        setSchema(reset);
+        setActiveSectionId(reset.sections[0]?.id || 'sec_farm');
+        showToast('Form reset to official DA Hinunangan default schema.');
+        if (onRefresh) onRefresh();
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : 'Unable to reset the registry form.');
+      }
     }
   };
 
   // Confirm and Publish
-  const handleConfirmPublish = () => {
-    storageService.saveRegistryFormSchema(schema);
-    storageService.saveRegistryFormDraft(schema);
-    setIsPublishModalOpen(false);
-    showToast('✓ Registry form customization published and synced successfully.');
-    if (onRefresh) onRefresh();
+  const handleConfirmPublish = async () => {
+    try {
+      const savedSchema = await storageService.saveRegistryFormSchema(schema);
+      storageService.saveRegistryFormDraft(savedSchema);
+      setSchema(savedSchema);
+      setIsPublishModalOpen(false);
+      showToast('Registry form customization published and synced successfully.');
+      if (onRefresh) onRefresh();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Unable to publish registry form.');
+    }
   };
 
   return (
