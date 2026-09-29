@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   FileText,
   Plus,
@@ -37,7 +37,7 @@ import { HINUNANGAN_BARANGAYS } from '../../data/barangays';
 import { DOCUMENT_TYPE_OPTIONS, INITIAL_CERTIFICATE_TEMPLATES } from '../../data/certificateTemplates';
 import { AVAILABLE_PLACEHOLDERS } from '../../utils/templateReplacer';
 import { DynamicCertificateView } from './DynamicCertificateView';
-import { storageService } from '../../services/storageService';
+import { moduleDataApi } from '../../services/api';
 
 interface CertificateTemplateEditorProps {
   initialTemplate?: CertificateTemplate;
@@ -54,7 +54,7 @@ export const CertificateTemplateEditor: React.FC<CertificateTemplateEditorProps>
 }) => {
   // Load templates from storage for search & selection
   const [availableTemplates, setAvailableTemplates] = useState<CertificateTemplate[]>(() => {
-    return storageService.getCertificateTemplates();
+    return [];
   });
 
   // Selected template state
@@ -64,6 +64,12 @@ export const CertificateTemplateEditor: React.FC<CertificateTemplateEditorProps>
     'info' | 'header_logos' | 'body' | 'signatories' | 'watermark' | 'receipt'
   >('header_logos');
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    moduleDataApi.get<CertificateTemplate[]>('certificate_templates')
+      .then(setAvailableTemplates)
+      .catch(error => setSaveNotice(error instanceof Error ? error.message : 'Unable to load report templates from database.'));
+  }, []);
 
   // Search & Filters for Template Switcher
   const [searchQuery, setSearchQuery] = useState('');
@@ -245,7 +251,6 @@ Issued this {{date_issued}} at Barangay {{barangay}}, Hinunangan, Southern Leyte
     const updatedList = [newTpl, ...availableTemplates];
     setAvailableTemplates(updatedList);
     setTemplate(newTpl);
-    storageService.saveCertificateTemplate(newTpl);
     setSaveNotice('Created new template! Edit parameters below.');
     setTimeout(() => setSaveNotice(null), 3000);
   };
@@ -425,9 +430,7 @@ Issued this {{date_issued}} at Barangay {{barangay}}, Hinunangan, Southern Leyte
       ...template,
       updatedAt: new Date().toISOString(),
     };
-    storageService.saveCertificateTemplate(updated);
-    // Refresh available templates list
-    setAvailableTemplates(storageService.getCertificateTemplates());
+    setAvailableTemplates(previous => [updated, ...previous.filter(item => item.id !== updated.id)]);
     onSave(updated);
     setSaveNotice('Template saved successfully!');
     setTimeout(() => setSaveNotice(null), 3000);

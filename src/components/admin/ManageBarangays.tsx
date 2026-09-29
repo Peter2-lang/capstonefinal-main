@@ -14,7 +14,7 @@ import {
   Ruler,
 } from 'lucide-react';
 import { Barangay } from '../../types';
-import { storageService } from '../../services/storageService';
+import { barangaysApi } from '../../services/api';
 import { BarangayBoundaryMap } from '../gis/BarangayBoundaryMap';
 import { HINUNANGAN_BARANGAY_BOUNDARIES } from '../../data/hinunanganBoundariesGeoJSON';
 import {
@@ -43,6 +43,7 @@ export const ManageBarangays: React.FC<ManageBarangaysProps> = ({ barangays, onR
   const [swineCount, setSwineCount] = useState(25);
   const [boundaryPolygon, setBoundaryPolygon] = useState<[number, number][]>([]);
   const [surveillanceRadiusMeters, setSurveillanceRadiusMeters] = useState(500);
+  const [saveError, setSaveError] = useState('');
 
   const startEdit = (b: Barangay) => {
     setIsEditing(b);
@@ -83,7 +84,7 @@ export const ManageBarangays: React.FC<ManageBarangaysProps> = ({ barangays, onR
     setBoundaryPolygon(generateDefaultBoundary(defaultLat, defaultLng, 0.75, 6));
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) {
       alert('Please provide a Barangay Name');
@@ -93,6 +94,8 @@ export const ManageBarangays: React.FC<ManageBarangaysProps> = ({ barangays, onR
     const perimeterKm = calculatePerimeterKm(boundaryPolygon);
     const areaHectares = calculatePolygonAreaHectares(boundaryPolygon);
 
+    setSaveError('');
+    try {
     if (isAddingNew) {
       const newBg: Barangay = {
         id: 'bg-' + name.toLowerCase().replace(/\s+/g, '-'),
@@ -109,7 +112,7 @@ export const ManageBarangays: React.FC<ManageBarangaysProps> = ({ barangays, onR
         boundaryAreaHectares: areaHectares,
         surveillanceRadiusMeters,
       };
-      storageService.saveBarangay(newBg);
+      await barangaysApi.create(newBg);
     } else if (isEditing) {
       const updatedBg: Barangay = {
         ...isEditing,
@@ -125,18 +128,25 @@ export const ManageBarangays: React.FC<ManageBarangaysProps> = ({ barangays, onR
         boundaryAreaHectares: areaHectares,
         surveillanceRadiusMeters,
       };
-      storageService.saveBarangay(updatedBg);
+      await barangaysApi.update(updatedBg.id, updatedBg);
     }
 
     setIsEditing(null);
     setIsAddingNew(false);
-    onRefresh();
+    await onRefresh();
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Unable to save barangay to database.');
+    }
   };
 
-  const handleDelete = (id: string, bgName: string) => {
+  const handleDelete = async (id: string, bgName: string) => {
     if (window.confirm(`Are you sure you want to delete Barangay "${bgName}" from Hinunangan registry?`)) {
-      storageService.deleteBarangay(id);
-      onRefresh();
+      try {
+        await barangaysApi.deactivate(id);
+        await onRefresh();
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : 'Unable to deactivate barangay.');
+      }
     }
   };
 
@@ -148,6 +158,7 @@ export const ManageBarangays: React.FC<ManageBarangaysProps> = ({ barangays, onR
 
   return (
     <div className="max-w-6xl mx-auto py-6 px-4 space-y-6">
+      {saveError && <div role="alert" className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">{saveError}</div>}
       {/* Header */}
       <div className="bg-white p-5 rounded-2xl border border-stone-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
         <div>

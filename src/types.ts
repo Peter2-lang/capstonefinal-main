@@ -688,6 +688,7 @@ export interface RegistryFormSchema {
 export interface BarangayBiosecurityAudit {
   id: string;
   barangay: string;
+  barangayId?: string;
   auditDate: string;
   auditorName: string;
   biosecurityLevel: 1 | 2 | 3; // Level 1 (Basic), Level 2 (Standard Bio-risk Mitigation), Level 3 (Full Commercial Isolation)
@@ -709,6 +710,7 @@ export interface BarangayBiosecurityAudit {
 export interface BiosecurityIncident {
   id: string;
   barangay: string;
+  barangayId?: string;
   reportDate: string;
   type: 'suspected_symptoms' | 'illegal_entry' | 'swill_violation' | 'disinfection_failure' | 'mortality';
   severity: 'low' | 'medium' | 'high';

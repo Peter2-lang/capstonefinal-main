@@ -49,6 +49,7 @@ import {
   CertificateTemplate,
 } from '../../types';
 import { storageService } from '../../services/storageService';
+import { moduleDataApi } from '../../services/api';
 import { HINUNANGAN_BARANGAYS } from '../../data/barangays';
 import {
   SealBagongPilipinas,
@@ -332,12 +333,16 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
   });
 
   // Dynamic Certificate Templates State
-  const [templates, setTemplates] = useState<CertificateTemplate[]>(() =>
-    storageService.getCertificateTemplates()
-  );
+  const [templates, setTemplates] = useState<CertificateTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('tpl-nava-official');
   const [isTemplateEditorOpen, setIsTemplateEditorOpen] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<CertificateTemplate | undefined>(undefined);
+
+  useEffect(() => {
+    moduleDataApi.get<CertificateTemplate[]>('certificate_templates')
+      .then(savedTemplates => setTemplates(savedTemplates))
+      .catch(error => console.error('Unable to load report templates from database:', error));
+  }, []);
 
   // Template Search & Filters in Manager
   const [tplSearchQuery, setTplSearchQuery] = useState('');
@@ -2155,14 +2160,18 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
         <CertificateTemplateEditor
           initialTemplate={editingTemplate}
           onClose={() => setIsTemplateEditorOpen(false)}
-          onSave={savedTemplate => {
-            storageService.saveCertificateTemplate(savedTemplate);
-            const updated = storageService.getCertificateTemplates();
-            setTemplates(updated);
-            setSelectedTemplateId(savedTemplate.id);
-            setIsTemplateEditorOpen(false);
-            setExportNotice(`Template "${savedTemplate.name}" saved successfully!`);
-            setTimeout(() => setExportNotice(null), 3500);
+          onSave={async savedTemplate => {
+            try {
+              const updated = [savedTemplate, ...templates.filter(template => template.id !== savedTemplate.id)];
+              const persisted = await moduleDataApi.save('certificate_templates', updated);
+              setTemplates(persisted);
+              setSelectedTemplateId(savedTemplate.id);
+              setIsTemplateEditorOpen(false);
+              setExportNotice(`Template "${savedTemplate.name}" saved successfully!`);
+              setTimeout(() => setExportNotice(null), 3500);
+            } catch (error) {
+              setExportNotice(error instanceof Error ? error.message : 'Unable to save report template to database.');
+            }
           }}
         />
       )}

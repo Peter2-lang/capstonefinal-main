@@ -117,6 +117,41 @@ export const accountsApi = {
   },
 };
 
+export const moduleDataApi = {
+  async get<T>(key: string): Promise<T> {
+    const res = await fetch(`/api/module-data/${encodeURIComponent(key)}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || 'Unable to load shared module data from database.');
+    }
+    return data.data as T;
+  },
+
+  async save<T>(key: string, value: T): Promise<T> {
+    const res = await fetch(`/api/module-data/${encodeURIComponent(key)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ data: value }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || 'Unable to save shared module data to database.');
+    }
+    return data.data as T;
+  },
+};
+
+export const biosecurityApi = {
+  getAudits: () => moduleDataApi.get<import('../types.ts').BarangayBiosecurityAudit[]>('biosecurity_audits'),
+  saveAudits: (audits: import('../types.ts').BarangayBiosecurityAudit[]) =>
+    moduleDataApi.save('biosecurity_audits', audits),
+  getIncidents: () => moduleDataApi.get<import('../types.ts').BiosecurityIncident[]>('biosecurity_incidents'),
+  saveIncidents: (incidents: import('../types.ts').BiosecurityIncident[]) =>
+    moduleDataApi.save('biosecurity_incidents', incidents),
+};
+
 export const farmersApi = {
   async getAll(): Promise<any[]> {
     const res = await fetch('/api/farmers', {
@@ -144,6 +179,37 @@ export const barangaysApi = {
     }
     const data = await res.json();
     return data.data || [];
+  },
+
+  async create(barangay: Partial<Barangay>): Promise<Barangay> {
+    const res = await fetch('/api/barangays', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(barangay),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new Error(data?.error || 'Unable to save barangay to database.');
+    return data.data;
+  },
+
+  async update(id: string, barangay: Partial<Barangay>): Promise<Barangay> {
+    const res = await fetch(`/api/barangays/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(barangay),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new Error(data?.error || 'Unable to update barangay in database.');
+    return data.data;
+  },
+
+  async deactivate(id: string): Promise<void> {
+    const res = await fetch(`/api/barangays/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new Error(data?.error || 'Unable to deactivate barangay in database.');
   },
 };
 

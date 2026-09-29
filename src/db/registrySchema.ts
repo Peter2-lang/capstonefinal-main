@@ -153,7 +153,9 @@ export async function upsertSchemaFieldInDb(field: Partial<DbRegistryField> & { 
  */
 export async function deleteSchemaFieldFromDb(id: string): Promise<boolean> {
   try {
-    await db.delete(registrySchema).where(eq(registrySchema.id, id));
+    await db.update(registrySchema)
+      .set({ visible: false, updatedAt: new Date() })
+      .where(eq(registrySchema.id, id));
     return true;
   } catch (err: any) {
     console.warn('Notice deleting from registry_schema:', err.message);
@@ -190,10 +192,12 @@ export async function syncFullRegistrySchemaToDb(schema: RegistryFormSchema): Pr
 
   // 2. Upsert each field into registry_schema table
   try {
+    const submittedFieldIds = new Set<string>();
     let orderCounter = 0;
     for (const section of schema.sections || []) {
       for (const field of section.fields || []) {
         orderCounter++;
+        submittedFieldIds.add(field.id);
         await upsertSchemaFieldInDb({
           id: field.id,
           fieldKey: field.fieldKey || toFieldKey(field.label, field.id),
@@ -216,6 +220,20 @@ export async function syncFullRegistrySchemaToDb(schema: RegistryFormSchema): Pr
           autoGenPrefix: field.autoGenPrefix,
         });
       }
+    }
+    const existingFields = await getAllSchemaFieldsFromDb();
+    const client = await pool.connect();
+    try {
+      for (const existingField of existingFields) {
+        if (!submittedFieldIds.has(existingField.id)) {
+          await client.query(
+            'UPDATE registry_schema SET visible = FALSE, updated_at = NOW() WHERE id = $1',
+            [existingField.id]
+          );
+        }
+      }
+    } finally {
+      client.release();
     }
   } catch (err: any) {
     console.warn('Notice syncing individual fields to registry_schema:', err.message);

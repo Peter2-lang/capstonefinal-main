@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Users, Plus, Edit, Trash2, Save, X, Key, Shield, UserCheck, Search } from 'lucide-react';
 import { Barangay, UserAccount, UserRole } from '../../types';
-import { storageService } from '../../services/storageService';
+import { accountsApi } from '../../services/api';
 
 interface ManageAccountsProps {
   users: UserAccount[];
@@ -14,6 +14,7 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
   const [searchTerm, setSearchTerm] = useState('');
   const [isEditing, setIsEditing] = useState<UserAccount | null>(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   // Form State
   const [name, setName] = useState('');
@@ -35,7 +36,7 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
     setName(u.name);
     setUsername(u.username);
     setEmail(u.email);
-    setPassword(u.password || '••••••••');
+    setPassword('');
     setRole(u.role);
     setAssignedBarangay(u.assignedBarangay || barangays[0]?.name || 'Poblacion');
     setContactNo(u.contactNo || '');
@@ -55,20 +56,22 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
     setActive(true);
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !username.trim() || !email.trim()) {
       alert('Please fill out full name, username, and email.');
       return;
     }
 
+    setSaveError('');
+    try {
     if (isAddingNew) {
       const newAcc: UserAccount = {
         id: 'usr-' + Date.now(),
         name: name.trim(),
         username: username.trim().toLowerCase(),
         email: email.trim().toLowerCase(),
-        password: password.trim(),
+        ...(password.trim() ? { password: password.trim() } : {}),
         role,
         assignedBarangay: role === 'focal' ? assignedBarangay : undefined,
         contactNo: contactNo.trim(),
@@ -76,36 +79,43 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
         active,
         createdAt: new Date().toISOString(),
       };
-      storageService.saveUserAccount(newAcc);
+      await accountsApi.create(newAcc);
     } else if (isEditing) {
       const updatedAcc: UserAccount = {
         ...isEditing,
         name: name.trim(),
         username: username.trim().toLowerCase(),
         email: email.trim().toLowerCase(),
-        password: password.trim() !== '••••••••' ? password.trim() : isEditing.password,
+        ...(password.trim() ? { password: password.trim() } : {}),
         role,
         assignedBarangay: role === 'focal' ? assignedBarangay : undefined,
         contactNo: contactNo.trim(),
         active,
       };
-      storageService.saveUserAccount(updatedAcc);
+      await accountsApi.update(updatedAcc.id, updatedAcc);
     }
 
     setIsEditing(null);
     setIsAddingNew(false);
-    onRefresh();
+    await onRefresh();
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Unable to save account to database.');
+    }
   };
 
-  const handleDelete = (id: string, accName: string) => {
+  const handleDelete = async (id: string, accName: string) => {
     const targetUser = users.find(u => u.id === id);
     if (targetUser?.role === 'super_admin' && currentUser?.role !== 'super_admin') {
       alert('Only a Super Admin can delete or modify a Super Admin account.');
       return;
     }
     if (window.confirm(`Are you sure you want to remove account "${accName}"?`)) {
-      storageService.deleteUserAccount(id);
-      onRefresh();
+      try {
+        await accountsApi.delete(id);
+        await onRefresh();
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : 'Unable to delete account from database.');
+      }
     }
   };
 
@@ -120,6 +130,7 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
   return (
     <div className="max-w-6xl mx-auto py-6 px-4 space-y-6">
       {/* Header */}
+      {saveError && <div role="alert" className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">{saveError}</div>}
       <div className="bg-white p-5 rounded-2xl border border-stone-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">

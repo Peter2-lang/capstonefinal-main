@@ -8,6 +8,7 @@ import { SuperAdminAuth } from './components/auth/SuperAdminAuth';
 import { AccessDenied403 } from './components/admin/media/AccessDenied403';
 import { hasPermission, isSuperAdminOnlyTab } from './utils/rbacPermissions';
 import { storageService } from './services/storageService';
+import { accountsApi, barangaysApi } from './services/api';
 import { landingCmsService } from './services/landingCmsService';
 import { BackgroundPhotoConfig } from './types/landingCms';
 import { Barangay, LandingPageConfig, SwineRecord, UserAccount, UserRole } from './types';
@@ -80,9 +81,9 @@ export default function App() {
   };
 
   const [swineList, setSwineList] = useState<SwineRecord[]>(() => storageService.getSwineRecords());
-  const [barangays, setBarangays] = useState<Barangay[]>(() => storageService.getBarangays());
+  const [barangays, setBarangays] = useState<Barangay[]>([]);
   const [landingConfig, setLandingConfig] = useState<LandingPageConfig>(() => storageService.getLandingConfig());
-  const [accounts, setAccounts] = useState<UserAccount[]>(() => storageService.getAccounts());
+  const [accounts, setAccounts] = useState<UserAccount[]>([]);
   const [interfaceBg, setInterfaceBg] = useState<BackgroundPhotoConfig | null>(() => {
     try {
       return landingCmsService.getDraftConfig().interfaceBackground || null;
@@ -165,9 +166,33 @@ export default function App() {
   const [unreadCount, setUnreadCount] = useState<number>(0);
 
   const refreshAllData = async () => {
-    setBarangays(storageService.getBarangays());
     setLandingConfig(storageService.getLandingConfig());
-    setAccounts(storageService.getAccounts());
+
+    if (currentUser && storageService.getSessionToken()) {
+      try {
+        await storageService.refreshRegistryFormSchemaFromCloud();
+      } catch (error) {
+        console.error('Unable to refresh registry form from database:', error);
+      }
+    }
+
+    try {
+      setBarangays(await barangaysApi.getAll());
+    } catch (error) {
+      console.error('Unable to refresh barangays from database:', error);
+      setBarangays([]);
+    }
+
+    if (currentUser?.role === 'super_admin') {
+      try {
+        setAccounts(await accountsApi.getAll());
+      } catch (error) {
+        console.error('Unable to refresh user accounts from database:', error);
+        setAccounts([]);
+      }
+    } else {
+      setAccounts([]);
+    }
 
     try {
       const { records } = await storageService.fetchSwineRecords();

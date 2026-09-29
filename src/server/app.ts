@@ -14,7 +14,7 @@ import { getAllCertificates, upsertCertificate } from '../db/certificates.ts';
 import { getAllUsers, getUserByUsernameOrEmail, upsertUser, deleteUserByUid } from '../db/users.ts';
 import { getAllMessages, createMessage, markMessageRead, deleteMessageById } from '../db/messages.ts';
 import { getAllMedia, insertMedia, deleteMediaById } from '../db/media.ts';
-import { getSystemSetting, setSystemSetting } from '../db/settings.ts';
+import { getStoredSystemSetting, getSystemSetting, setSystemSetting } from '../db/settings.ts';
 import { initPostgresTables, pool, testDatabaseConnection, updateDatabaseConnection } from '../db/index.ts';
 import {
   getFullRegistrySchemaFromDb,
@@ -25,6 +25,7 @@ import {
 } from '../db/registrySchema.ts';
 import { DEFAULT_SIDEBAR_THEME, INITIAL_REGISTRY_FORM_SCHEMA } from '../data/initialFormSchema.ts';
 import { INITIAL_LANDING_CONFIG } from '../data/initialData.ts';
+import { INITIAL_CERTIFICATE_TEMPLATES } from '../data/certificateTemplates.ts';
 import { DEFAULT_MASTER_CONFIG } from '../data/defaultMasterConfig.ts';
 import { INITIAL_LANDING_CMS_CONFIG } from '../data/initialLandingCmsData.ts';
 import { uploadLandingCmsAsset } from './supabaseStorage.ts';
@@ -142,8 +143,11 @@ export function createApp() {
   app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 
   app.use((req, res, next) => {
-    if (!/^\/api\/(?:swine(?:-records)?|sync|registry-schema)(?:\/|$)/.test(req.path) &&
-        !/^\/api\/admin\/registry-form-schema(?:\/|$)/.test(req.path)) return next();
+    const requiresSession =
+      /^\/api\/(?:swine(?:-records)?|sync|registry-schema|module-data|accounts)(?:\/|$)/.test(req.path) ||
+      /^\/api\/admin\/registry-form-schema(?:\/|$)/.test(req.path) ||
+      ((req.path === '/api/barangays' || req.path.startsWith('/api/barangays/')) && req.method !== 'GET');
+    if (!requiresSession) return next();
     const authorization = req.headers.authorization || '';
     const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
     const authenticatedUser = verifySessionToken(token);
@@ -375,6 +379,65 @@ export function createApp() {
     } catch (err: any) {
       console.error('Error deleting user account:', err);
       return res.status(500).json({ success: false, error: 'Failed to delete user account from database.' });
+    }
+  });
+
+  const sharedModuleDataKeys = new Set([
+    'biosecurity_audits',
+    'biosecurity_incidents',
+    'official_reports_config',
+    'certificate_config',
+    'certificate_templates',
+  ]);
+  const sharedModuleArrayKeys = new Set([
+    'biosecurity_audits',
+    'biosecurity_incidents',
+    'certificate_templates',
+  ]);
+  const adminOnlyModuleDataKeys = new Set([
+    'official_reports_config',
+    'certificate_config',
+    'certificate_templates',
+  ]);
+
+  app.get('/api/module-data/:key', async (req, res) => {
+    const user = getUserSecurityContext(req);
+    if (!user.isAuthenticated || !sharedModuleDataKeys.has(req.params.key)) {
+      return res.status(403).json({ success: false, error: 'You do not have permission to access this resource.' });
+    }
+    try {
+      let value = await getStoredSystemSetting(req.params.key);
+      if (value === null && req.params.key === 'certificate_templates') {
+        value = await setSystemSetting(req.params.key, INITIAL_CERTIFICATE_TEMPLATES);
+      }
+      return res.json({ success: true, data: value ?? (sharedModuleArrayKeys.has(req.params.key) ? [] : {}) });
+    } catch {
+      return res.status(500).json({ success: false, error: 'Unable to load module data from database.' });
+    }
+  });
+
+  app.put('/api/module-data/:key', async (req, res) => {
+    const user = getUserSecurityContext(req);
+    if (!sharedModuleDataKeys.has(req.params.key) ||
+      (adminOnlyModuleDataKeys.has(req.params.key) ? !user.isAdmin : !user.isAuthenticated)) {
+      return res.status(403).json({ success: false, error: 'You do not have permission to update this resource.' });
+    }
+    if (req.body?.data === undefined) {
+      return res.status(400).json({ success: false, error: 'Module data is required.' });
+    }
+    if (sharedModuleArrayKeys.has(req.params.key) && !Array.isArray(req.body.data)) {
+      return res.status(400).json({ success: false, error: 'This module data must be an array.' });
+    }
+    if (!sharedModuleArrayKeys.has(req.params.key) && (typeof req.body.data !== 'object' || req.body.data === null || Array.isArray(req.body.data))) {
+      return res.status(400).json({ success: false, error: 'This module data must be an object.' });
+    }
+    try {
+      const saved = await setSystemSetting(req.params.key, req.body.data);
+      const confirmed = await getStoredSystemSetting(req.params.key);
+      if (confirmed === null) throw new Error('Database did not return the saved module data.');
+      return res.json({ success: true, data: confirmed ?? saved });
+    } catch {
+      return res.status(500).json({ success: false, error: 'Unable to save module data to database.' });
     }
   });
 
@@ -912,8 +975,45 @@ export function createApp() {
   // =========================================================================
   // 4. BARANGAYS API (DATABASE-ENRICHED REAL-TIME STATISTICS)
   // =========================================================================
+  const mapBarangayRow = (row: any, stats?: { totalSwine: number; readyToSell: number; farmers: Set<string> }) => ({
+    ...(row.metadata || {}),
+    id: String(row.id),
+    name: row.name,
+    code: row.code,
+    latitude: Number(row.latitude || 0),
+    longitude: Number(row.longitude || 0),
+    riskLevel: row.metadata?.riskLevel || 'green',
+    focalPerson: row.metadata?.focalPerson || '',
+    focalPersonName: row.metadata?.focalPersonName || row.metadata?.focalPerson || '',
+    contactNo: row.metadata?.contactNo || '',
+    registeredSwineCount: stats?.totalSwine || 0,
+    registeredFarmerCount: stats?.farmers.size || 0,
+    readyToSellCount: stats?.readyToSell || 0,
+    asfZone: (row.metadata?.riskLevel || 'green').toUpperCase(),
+  });
+
+  const seedBarangaysWhenEmpty = async () => {
+    const existing = await pool.query('SELECT id FROM barangays LIMIT 1');
+    if (existing.rows.length > 0) return;
+    for (const barangay of HINUNANGAN_BARANGAYS) {
+      const metadata = {
+        riskLevel: barangay.defaultRiskLevel,
+        focalPerson: barangay.focalPersonName,
+        focalPersonName: barangay.focalPersonName,
+        contactNo: barangay.contactNumber,
+        isUrban: barangay.isUrban,
+      };
+      await pool.query(
+        'INSERT INTO barangays (code, name, municipality, latitude, longitude, is_active, metadata) VALUES ($1, $2, $3, $4, $5, TRUE, $6::jsonb) ON CONFLICT (code) DO NOTHING',
+        [barangay.code, barangay.name, 'Hinunangan', barangay.latitude, barangay.longitude, JSON.stringify(metadata)]
+      );
+    }
+  };
+
   app.get('/api/barangays', async (_req, res) => {
     try {
+      await seedBarangaysWhenEmpty();
+      const barangayResult = await pool.query('SELECT * FROM barangays WHERE is_active = TRUE ORDER BY name');
       const { records } = await getAllSwineRecords();
 
       const countsByBarangay: Record<string, { totalSwine: number; readyToSell: number; farmers: Set<string> }> = {};
@@ -932,16 +1032,10 @@ export function createApp() {
         }
       });
 
-      const enrichedBarangays = HINUNANGAN_BARANGAYS.map(b => {
-        const stats = countsByBarangay[b.name.toLowerCase()] || { totalSwine: 0, readyToSell: 0, farmers: new Set() };
-        return {
-          ...b,
-          registeredSwineCount: stats.totalSwine,
-          registeredFarmerCount: stats.farmers.size,
-          readyToSellCount: stats.readyToSell,
-          asfZone: b.defaultRiskLevel.toUpperCase(),
-        };
-      });
+      const enrichedBarangays = barangayResult.rows.map((row: any) => mapBarangayRow(
+        row,
+        countsByBarangay[row.name.toLowerCase()] || { totalSwine: 0, readyToSell: 0, farmers: new Set() }
+      ));
 
       return res.json({
         success: true,
@@ -949,8 +1043,63 @@ export function createApp() {
         data: enrichedBarangays,
       });
     } catch (err: any) {
-      console.error('Error computing barangay statistics:', err);
-      return res.json({ success: true, count: HINUNANGAN_BARANGAYS.length, data: HINUNANGAN_BARANGAYS });
+      console.error('Error loading barangays from database:', err);
+      return res.status(500).json({ success: false, error: 'Unable to load barangays from database.' });
+    }
+  });
+
+  app.post('/api/barangays', async (req, res) => {
+    if (!getUserSecurityContext(req).isAdmin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can create barangays.' });
+    }
+    const { name, code, latitude, longitude, ...metadata } = req.body || {};
+    if (typeof name !== 'string' || !name.trim() || typeof code !== 'string' || !code.trim()) {
+      return res.status(400).json({ success: false, error: 'Barangay name and code are required.' });
+    }
+    try {
+      const result = await pool.query(
+        'INSERT INTO barangays (code, name, municipality, latitude, longitude, is_active, metadata) VALUES ($1, $2, $3, $4, $5, TRUE, $6::jsonb) RETURNING *',
+        [code.trim(), name.trim(), 'Hinunangan', Number(latitude) || 0, Number(longitude) || 0, JSON.stringify(metadata)]
+      );
+      return res.status(201).json({ success: true, data: mapBarangayRow(result.rows[0]) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err?.code === '23505' ? 'Barangay name or code already exists.' : 'Unable to save barangay to database.' });
+    }
+  });
+
+  app.put('/api/barangays/:id', async (req, res) => {
+    if (!getUserSecurityContext(req).isAdmin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can update barangays.' });
+    }
+    const { name, code, latitude, longitude, ...metadata } = req.body || {};
+    if (typeof name !== 'string' || !name.trim() || typeof code !== 'string' || !code.trim()) {
+      return res.status(400).json({ success: false, error: 'Barangay name and code are required.' });
+    }
+    try {
+      const result = await pool.query(
+        'UPDATE barangays SET code = $2, name = $3, latitude = $4, longitude = $5, metadata = $6::jsonb, updated_at = NOW() WHERE id = $1 RETURNING *',
+        [req.params.id, code.trim(), name.trim(), Number(latitude) || 0, Number(longitude) || 0, JSON.stringify(metadata)]
+      );
+      if (result.rowCount === 0) return res.status(404).json({ success: false, error: 'Barangay not found.' });
+      return res.json({ success: true, data: mapBarangayRow(result.rows[0]) });
+    } catch {
+      return res.status(500).json({ success: false, error: 'Unable to update barangay in database.' });
+    }
+  });
+
+  app.delete('/api/barangays/:id', async (req, res) => {
+    if (!getUserSecurityContext(req).isAdmin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can deactivate barangays.' });
+    }
+    try {
+      const result = await pool.query(
+        'UPDATE barangays SET is_active = FALSE, updated_at = NOW() WHERE id = $1 RETURNING id',
+        [req.params.id]
+      );
+      if (result.rowCount === 0) return res.status(404).json({ success: false, error: 'Barangay not found.' });
+      return res.json({ success: true });
+    } catch {
+      return res.status(500).json({ success: false, error: 'Unable to deactivate barangay in database.' });
     }
   });
 

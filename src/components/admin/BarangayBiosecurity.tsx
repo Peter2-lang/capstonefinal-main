@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { Barangay, BarangayBiosecurityAudit, BiosecurityIncident, RiskLevel, SwineRecord, UserAccount } from '../../types';
 import { storageService } from '../../services/storageService';
+import { biosecurityApi } from '../../services/api';
 
 interface BarangayBiosecurityProps {
   barangays: Barangay[];
@@ -39,8 +40,27 @@ export const BarangayBiosecurity: React.FC<BarangayBiosecurityProps> = ({
   onRefresh,
   onNavigateToGis,
 }) => {
-  const [audits, setAudits] = useState<BarangayBiosecurityAudit[]>(() => storageService.getBiosecurityAudits());
-  const [incidents, setIncidents] = useState<BiosecurityIncident[]>(() => storageService.getBiosecurityIncidents());
+  const [audits, setAudits] = useState<BarangayBiosecurityAudit[]>([]);
+  const [incidents, setIncidents] = useState<BiosecurityIncident[]>([]);
+  const [databaseError, setDatabaseError] = useState('');
+
+  const refreshBiosecurityData = async () => {
+    try {
+      const [savedAudits, savedIncidents] = await Promise.all([
+        biosecurityApi.getAudits(),
+        biosecurityApi.getIncidents(),
+      ]);
+      setAudits(savedAudits);
+      setIncidents(savedIncidents);
+      setDatabaseError('');
+    } catch (error) {
+      setDatabaseError(error instanceof Error ? error.message : 'Unable to load biosecurity data from database.');
+    }
+  };
+
+  useEffect(() => {
+    void refreshBiosecurityData();
+  }, []);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [zoneFilter, setZoneFilter] = useState<'all' | RiskLevel>('all');
@@ -122,7 +142,7 @@ export const BarangayBiosecurity: React.FC<BarangayBiosecurityProps> = ({
     setAuditForm({ ...updated, complianceScore: score, biosecurityLevel: level, status });
   };
 
-  const handleSaveAudit = (e: React.FormEvent) => {
+  const handleSaveAudit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!auditForm.barangay) return;
 
@@ -130,6 +150,7 @@ export const BarangayBiosecurity: React.FC<BarangayBiosecurityProps> = ({
     const newAudit: BarangayBiosecurityAudit = {
       id: auditForm.id || `audit-${Date.now()}`,
       barangay: auditForm.barangay,
+      barangayId: barangays.find(item => item.name.toLowerCase() === auditForm.barangay?.toLowerCase())?.id,
       auditDate: auditForm.auditDate || new Date().toISOString().split('T')[0],
       auditorName: auditForm.auditorName || currentUser?.name || 'MAO Biosecurity Officer',
       biosecurityLevel: level,
@@ -148,20 +169,25 @@ export const BarangayBiosecurity: React.FC<BarangayBiosecurityProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    storageService.saveBiosecurityAudit(newAudit);
-    const updatedList = storageService.getBiosecurityAudits();
-    setAudits(updatedList);
-    setIsAuditModalOpen(false);
-    onRefresh();
+    try {
+      const updatedList = [newAudit, ...audits.filter(a => a.id !== newAudit.id)];
+      await biosecurityApi.saveAudits(updatedList);
+      await refreshBiosecurityData();
+      setIsAuditModalOpen(false);
+      await onRefresh();
+    } catch (error) {
+      setDatabaseError(error instanceof Error ? error.message : 'Unable to save biosecurity audit.');
+    }
   };
 
-  const handleSaveIncident = (e: React.FormEvent) => {
+  const handleSaveIncident = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!incidentForm.barangay || !incidentForm.description) return;
 
     const newInc: BiosecurityIncident = {
       id: `inc-${Date.now()}`,
       barangay: incidentForm.barangay,
+      barangayId: barangays.find(item => item.name.toLowerCase() === incidentForm.barangay?.toLowerCase())?.id,
       reportDate: incidentForm.reportDate || new Date().toISOString().split('T')[0],
       type: incidentForm.type || 'suspected_symptoms',
       severity: incidentForm.severity || 'medium',
@@ -172,10 +198,14 @@ export const BarangayBiosecurity: React.FC<BarangayBiosecurityProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    storageService.addBiosecurityIncident(newInc);
-    setIncidents(storageService.getBiosecurityIncidents());
-    setIsIncidentModalOpen(false);
-    onRefresh();
+    try {
+      await biosecurityApi.saveIncidents([newInc, ...incidents]);
+      await refreshBiosecurityData();
+      setIsIncidentModalOpen(false);
+      await onRefresh();
+    } catch (error) {
+      setDatabaseError(error instanceof Error ? error.message : 'Unable to save biosecurity incident.');
+    }
   };
 
   const handleSendAdvisory = (e: React.FormEvent) => {
@@ -346,6 +376,11 @@ export const BarangayBiosecurity: React.FC<BarangayBiosecurityProps> = ({
 
   return (
     <div className="py-6 px-4 max-w-7xl mx-auto space-y-6">
+            {databaseError && (
+              <div role="alert" className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+                {databaseError}
+              </div>
+            )}
       {/* Top Banner / Hero Card */}
       <div className="bg-gradient-to-r from-emerald-900 via-teal-900 to-stone-900 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden border border-emerald-800">
         <div className="absolute right-0 top-0 bottom-0 w-1/3 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-emerald-500/10 to-transparent pointer-events-none" />
@@ -1261,10 +1296,15 @@ export const BarangayBiosecurity: React.FC<BarangayBiosecurityProps> = ({
                       </span>
                     ) : (
                       <button
-                        onClick={() => {
-                          storageService.updateBiosecurityIncident({ ...inc, resolved: true });
-                          setIncidents(storageService.getBiosecurityIncidents());
-                          onRefresh();
+                        onClick={async () => {
+                          try {
+                            const updated = incidents.map(item => item.id === inc.id ? { ...item, resolved: true } : item);
+                            await biosecurityApi.saveIncidents(updated);
+                            await refreshBiosecurityData();
+                          } catch (error) {
+                            setDatabaseError(error instanceof Error ? error.message : 'Unable to update biosecurity incident.');
+                          }
+                          await onRefresh();
                         }}
                         className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs cursor-pointer shadow-xs"
                       >
