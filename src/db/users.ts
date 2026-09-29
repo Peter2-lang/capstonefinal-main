@@ -2,9 +2,9 @@ import { db } from './index.ts';
 import { users } from './schema.ts';
 import { eq, or } from 'drizzle-orm';
 import { UserAccount } from '../types.ts';
-import { INITIAL_ACCOUNTS } from '../data/initialData.ts';
 
 export function mapDbToUser(row: any): UserAccount {
+  const permissions = typeof row.permissions === 'string' ? JSON.parse(row.permissions) : row.permissions;
   return {
     id: String(row.uid || row.id),
     username: row.email ? row.email.split('@')[0] : `user-${row.id}`,
@@ -14,38 +14,18 @@ export function mapDbToUser(row: any): UserAccount {
     assignedBarangay: row.assignedBarangay || undefined,
     barangay_id: row.assignedBarangay ? `brgy-${row.assignedBarangay.toLowerCase().replace(/\s+/g, '-')}` : undefined,
     phone: row.phone || '',
-    password: row.password || '',
+    contactNo: row.phone || '',
+    authUserId: row.authUserId || undefined,
+    active: row.active ?? row.isActive ?? row.status === 'active',
+    status: row.status || (row.active === false ? 'inactive' : 'active'),
+    permissions: Array.isArray(permissions) ? permissions : [],
     createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
   };
 }
 
 export async function getAllUsers(): Promise<UserAccount[]> {
-  try {
-    let rows = await db.select().from(users);
-    if (rows.length === 0) {
-      // Seed the default system accounts into the real database once
-      for (const acc of INITIAL_ACCOUNTS) {
-        try {
-          await db.insert(users).values({
-            uid: acc.id,
-            email: acc.email,
-            name: acc.name,
-            role: acc.role,
-            assignedBarangay: acc.assignedBarangay || null,
-            phone: acc.phone || null,
-            password: acc.password || 'password123',
-          }).onConflictDoNothing();
-        } catch {
-          // ignore seeding conflict
-        }
-      }
-      rows = await db.select().from(users);
-    }
-    return rows.map(mapDbToUser);
-  } catch (err) {
-    console.error('Database query failed for getAllUsers:', err);
-    return [];
-  }
+  const rows = await db.select().from(users);
+  return rows.map(mapDbToUser);
 }
 
 export async function getUserByUsernameOrEmail(identifier: string): Promise<UserAccount | null> {
@@ -68,19 +48,28 @@ export async function getUserByUsernameOrEmail(identifier: string): Promise<User
   }
 }
 
+export async function getUserByAuthUserId(authUserId: string): Promise<UserAccount | null> {
+  const rows = await db.select().from(users).where(eq(users.authUserId, authUserId)).limit(1);
+  return rows[0] ? mapDbToUser(rows[0]) : null;
+}
+
 export async function upsertUser(user: Partial<UserAccount>): Promise<UserAccount> {
   try {
     const uid = user.id || `usr-${Date.now()}`;
     const email = user.email || `${user.username || 'user'}@hinunangan.da.gov.ph`;
     
     const values = {
+      id: user.authUserId || user.id,
       uid,
       email,
       name: user.name || user.fullName || user.username || 'User',
       role: user.role || 'focal',
       assignedBarangay: user.assignedBarangay || null,
       phone: user.phone || null,
-      password: user.password || 'password123',
+      authUserId: user.authUserId || null,
+      active: user.active ?? true,
+      status: user.status || (user.active === false ? 'inactive' : 'active'),
+      permissions: user.permissions || [],
     };
 
     const result = await db

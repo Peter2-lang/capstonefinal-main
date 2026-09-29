@@ -6,11 +6,13 @@ export interface UserAccount {
   name: string;
   fullName?: string;
   email: string;
-  password?: string;
   role: UserRole;
   phone?: string;
   contactNo?: string;
   active?: boolean;
+  status?: 'active' | 'inactive' | 'pending' | 'suspended';
+  authUserId?: string;
+  permissions?: string[];
   assignedBarangay?: string; // required for focal person
   barangay_id?: string; // canonical reference id e.g. "brgy-bugho"
   avatarUrl?: string;
@@ -465,6 +467,7 @@ export interface CertificateConfig {
 export interface IssuedCertificate {
   id?: string;
   certificateNo: string;
+  controlNumber?: string;
   certificateType?: string;
   formatType?: 'barangay_cert' | 'biosecurity' | 'health' | 'origin' | 'slaughter' | 'registration' | 'custom';
   barangay?: string;
@@ -492,6 +495,11 @@ export interface IssuedCertificate {
   templateId?: string;
   templateSnapshot?: CertificateTemplate;
   renderedBody?: string;
+  purpose?: string;
+  destination?: string;
+  inspectedBy?: string;
+  createdBy?: string;
+  certificateData?: Record<string, unknown>;
 }
 
 export interface TransmittalLetter {

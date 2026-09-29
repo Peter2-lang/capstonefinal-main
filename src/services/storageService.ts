@@ -74,6 +74,9 @@ const STORAGE_KEYS = {
   REGISTRY_FORM_SCHEMA_DRAFT: 'da_hinunangan_registry_form_schema_draft_v1',
 };
 
+let currentAuthUser: UserAccount | null = null;
+let currentAuthToken: string | null = null;
+
 // Safe LocalStorage helpers
 function getItem<T>(key: string, defaultValue: T): T {
   try {
@@ -785,24 +788,24 @@ export const storageService = {
   },
 
   getCurrentUser(): UserAccount | null {
-    return getItem<UserAccount | null>(STORAGE_KEYS.CURRENT_USER, null);
+    return currentAuthUser;
   },
 
   setCurrentUser(user: UserAccount | null, preserveSessionToken = false): void {
     const previousUser = this.getCurrentUser();
     if (user && previousUser?.id !== user.id && !preserveSessionToken) {
-      setItem(STORAGE_KEYS.SESSION_TOKEN, null);
+      currentAuthToken = null;
     }
-    setItem(STORAGE_KEYS.CURRENT_USER, user);
-    if (!user) setItem(STORAGE_KEYS.SESSION_TOKEN, null);
+    currentAuthUser = user;
+    if (!user) currentAuthToken = null;
   },
 
   getSessionToken(): string | null {
-    return getItem<string | null>(STORAGE_KEYS.SESSION_TOKEN, null);
+    return currentAuthToken;
   },
 
   setSessionToken(token: string | null): void {
-    setItem(STORAGE_KEYS.SESSION_TOKEN, token);
+    currentAuthToken = token;
   },
 
   // Messages

@@ -1,5 +1,5 @@
 import express from 'express';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { HINUNANGAN_BARANGAYS } from '../data/barangays.ts';
 import { ALL_ASF_REGULATIONS } from '../data/asfRegulationsData.ts';
 import {
@@ -10,8 +10,9 @@ import {
   deleteSwineRecordById,
   deleteSwineRecordsByIds,
 } from '../db/swine.ts';
-import { getAllCertificates, upsertCertificate } from '../db/certificates.ts';
-import { getAllUsers, getUserByUsernameOrEmail, upsertUser, deleteUserByUid } from '../db/users.ts';
+import { archiveCertificateByControlNumber, getAllCertificates, upsertCertificate } from '../db/certificates.ts';
+import { getCertificateTemplates, saveCertificateTemplates } from '../db/certificateTemplates.ts';
+import { getAllUsers, getUserByAuthUserId, getUserByUsernameOrEmail, upsertUser, deleteUserByUid } from '../db/users.ts';
 import { getAllMessages, createMessage, markMessageRead, deleteMessageById } from '../db/messages.ts';
 import { getAllMedia, insertMedia, deleteMediaById } from '../db/media.ts';
 import { getStoredSystemSetting, getSystemSetting, setSystemSetting } from '../db/settings.ts';
@@ -31,12 +32,10 @@ import { INITIAL_LANDING_CMS_CONFIG } from '../data/initialLandingCmsData.ts';
 import { uploadLandingCmsAsset } from './supabaseStorage.ts';
 import { interpretSuperAdminConfigCommand } from '../utils/configCommandInterpreter.ts';
 import { isValidPhilippinePhoneNumber, normalizePhilippinePhoneNumber } from '../utils/registryFieldUtils.ts';
+import { supabaseAdminClient, supabaseAuthClient } from '../lib/supabaseServer.ts';
 
 export function createApp() {
   const app = express();
-  const configuredSessionSecret = process.env.SESSION_SECRET?.trim();
-  const sessionSecret = configuredSessionSecret || (process.env.NODE_ENV === 'production' ? '' : randomBytes(32).toString('hex'));
-  const hasValidSessionSecret = sessionSecret.length >= 32;
 
   type SessionUser = {
     userId: string;
@@ -45,43 +44,8 @@ export function createApp() {
     role: string;
     assignedBarangay: string;
     barangayId: string;
-    expiresAt: number;
-  };
-
-  const createSessionToken = (user: any): string => {
-    const payload: SessionUser = {
-      userId: String(user.uid || user.id),
-      username: String(user.username || user.email || ''),
-      name: String(user.name || user.fullName || user.username || ''),
-      role: String(user.role || 'focal'),
-      assignedBarangay: String(user.assignedBarangay || ''),
-      barangayId: String(user.barangay_id || user.barangayId || ''),
-      expiresAt: Date.now() + 12 * 60 * 60 * 1000,
-    };
-    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
-    const signature = createHmac('sha256', sessionSecret).update(encodedPayload).digest('base64url');
-    return `${encodedPayload}.${signature}`;
-  };
-
-  const verifySessionToken = (token: string): SessionUser | null => {
-    if (!hasValidSessionSecret) return null;
-    const [encodedPayload, providedSignature, extra] = token.split('.');
-    if (!encodedPayload || !providedSignature || extra) return null;
-    const expectedSignature = createHmac('sha256', sessionSecret).update(encodedPayload).digest();
-    let receivedSignature: Buffer;
-    try {
-      receivedSignature = Buffer.from(providedSignature, 'base64url');
-    } catch {
-      return null;
-    }
-    if (receivedSignature.length !== expectedSignature.length || !timingSafeEqual(receivedSignature, expectedSignature)) return null;
-    try {
-      const user = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8')) as SessionUser;
-      const validRoles = ['super_admin', 'admin', 'focal', 'agent'];
-      return user.expiresAt > Date.now() && user.userId && validRoles.includes(user.role) ? user : null;
-    } catch {
-      return null;
-    }
+    permissions: string[];
+    active: boolean;
   };
 
   const uuidForSyncOperation = (operationId: string): string => {
@@ -142,20 +106,42 @@ export function createApp() {
   app.use(express.json({ limit: '30mb' }));
   app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 
-  app.use((req, res, next) => {
+  app.use(async (req, res, next) => {
     const requiresSession =
-      /^\/api\/(?:swine(?:-records)?|sync|registry-schema|module-data|accounts)(?:\/|$)/.test(req.path) ||
+      /^\/api\/(?:swine(?:-records)?|sync|registry-schema|module-data|accounts|certificates)(?:\/|$)/.test(req.path) ||
+      req.path === '/api/auth/profile' ||
       /^\/api\/admin\/registry-form-schema(?:\/|$)/.test(req.path) ||
       ((req.path === '/api/barangays' || req.path.startsWith('/api/barangays/')) && req.method !== 'GET');
     if (!requiresSession) return next();
     const authorization = req.headers.authorization || '';
     const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
-    const authenticatedUser = verifySessionToken(token);
-    if (!authenticatedUser) {
-      return res.status(401).json({ success: false, error: 'Authentication required. Please sign in again.' });
+    if (!token || !supabaseAuthClient) {
+      return res.status(401).json({ success: false, error: 'Supabase Auth session required.' });
     }
-    (req as any).authenticatedUser = authenticatedUser;
-    return next();
+    try {
+      const { data, error } = await supabaseAuthClient.auth.getUser(token);
+      if (error || !data.user) {
+        return res.status(401).json({ success: false, error: 'Supabase Auth session is invalid or expired.' });
+      }
+      const profile = await getUserByAuthUserId(data.user.id);
+      if (!profile || !profile.active || profile.status !== 'active') {
+        return res.status(403).json({ success: false, error: 'No active application profile is linked to this Supabase account.' });
+      }
+      (req as any).authenticatedUser = {
+        userId: data.user.id,
+        username: profile.username,
+        name: profile.name,
+        role: profile.role,
+        assignedBarangay: profile.assignedBarangay || '',
+        barangayId: profile.barangay_id || '',
+        permissions: profile.permissions || [],
+        active: profile.active,
+      } satisfies SessionUser;
+      return next();
+    } catch (error) {
+      console.error('Supabase session validation failed:', error);
+      return res.status(503).json({ success: false, error: 'Unable to validate Supabase Auth session.' });
+    }
   });
 
   app.get(['/health', '/api/health'], async (_req, res) => {
@@ -205,17 +191,15 @@ export function createApp() {
 
   // Helper to extract authenticated user security context
   function getUserSecurityContext(req: express.Request) {
-    const authorization = req.headers.authorization || '';
-    const bearerToken = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
-    const authenticatedUser = ((req as any).authenticatedUser || verifySessionToken(bearerToken)) as SessionUser | null;
-    const rawRole = authenticatedUser?.role || (req.headers['x-user-role'] as string) || (req.query.role as string) || '';
+    const authenticatedUser = ((req as any).authenticatedUser || null) as SessionUser | null;
+    const rawRole = authenticatedUser?.role || '';
     const role = (rawRole === 'super_admin' || rawRole === 'admin' || rawRole === 'focal' || rawRole === 'agent')
       ? rawRole
       : 'guest';
-    const barangayId = authenticatedUser?.barangayId || (req.headers['x-user-barangay-id'] as string) || (req.query.barangay_id as string) || '';
-    const assignedBarangay = authenticatedUser?.assignedBarangay || (req.headers['x-user-assigned-barangay'] as string) || (req.query.assigned_barangay as string) || '';
-    const userId = authenticatedUser?.userId || (req.headers['x-user-id'] as string) || (req.query.user_id as string) || '';
-    const username = authenticatedUser?.username || (req.headers['x-user-name'] as string) || (req.query.user_name as string) || (role === 'guest' ? 'Visitor' : 'User');
+    const barangayId = authenticatedUser?.barangayId || '';
+    const assignedBarangay = authenticatedUser?.assignedBarangay || '';
+    const userId = authenticatedUser?.userId || '';
+    const username = authenticatedUser?.username || (role === 'guest' ? 'Visitor' : 'User');
     const isSuperAdmin = role === 'super_admin';
     const isAdmin = role === 'admin' || role === 'super_admin';
     const isAgent = role === 'agent';
@@ -234,40 +218,75 @@ export function createApp() {
     if (!username || !password) {
       return res.status(400).json({ success: false, error: 'Username and password are required.' });
     }
-    if (!hasValidSessionSecret) {
-      return res.status(503).json({ success: false, error: 'Authentication is not configured. Set SESSION_SECRET on the server.' });
+    if (!supabaseAuthClient) {
+      return res.status(503).json({ success: false, error: 'Supabase Auth is not configured on the server.' });
     }
 
     try {
       const user = await getUserByUsernameOrEmail(username.trim());
-      if (!user) {
+      if (!user || !user.authUserId) {
         return res.status(401).json({ success: false, error: 'Invalid username or password.' });
       }
 
-      if (user.active === false) {
+      if (!user.active || user.status !== 'active') {
         return res.status(403).json({ success: false, error: 'This account has been deactivated.' });
       }
 
-      if (!user.password || user.password !== password.trim()) {
-        return res.status(401).json({ success: false, error: 'Invalid username or password.' });
-      }
       if (!['super_admin', 'admin', 'focal', 'agent'].includes(user.role)) {
         return res.status(403).json({ success: false, error: 'This account does not have an authorized application role.' });
       }
 
-      const safeUser = { ...user };
-      delete (safeUser as any).password;
+      const { data, error } = await supabaseAuthClient.auth.signInWithPassword({
+        email: user.email,
+        password: String(password),
+      });
+      if (error || !data.session) {
+        return res.status(401).json({ success: false, error: error?.message || 'Invalid Supabase Auth credentials.' });
+      }
 
       return res.json({
         success: true,
-        user: safeUser,
-        token: createSessionToken(safeUser),
-        role: safeUser.role,
-        assignedBarangay: safeUser.assignedBarangay,
+        user,
+        token: data.session.access_token,
+        refreshToken: data.session.refresh_token,
+        role: user.role,
+        assignedBarangay: user.assignedBarangay,
       });
     } catch (err: any) {
       console.error('Error during login authentication:', err);
-      return res.status(500).json({ success: false, error: 'Database authentication service unavailable.' });
+      return res.status(500).json({ success: false, error: err?.message || 'Supabase Auth service unavailable.' });
+    }
+  });
+
+  app.get('/api/auth/profile', async (req, res) => {
+    const authenticated = getUserSecurityContext(req);
+    if (!authenticated.isAuthenticated) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
+    }
+    try {
+      const user = await getUserByAuthUserId(authenticated.userId);
+      if (!user || !user.active || user.status !== 'active') {
+        return res.status(403).json({ success: false, error: 'No active application profile is linked to this account.' });
+      }
+      return res.json({ success: true, data: user });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, error: error?.message || 'Unable to load the application profile.' });
+    }
+  });
+
+  app.patch('/api/auth/profile', async (req, res) => {
+    const security = getUserSecurityContext(req);
+    if (!security.isAuthenticated) return res.status(401).json({ success: false, error: 'Authentication required.' });
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+    if (!name) return res.status(400).json({ success: false, error: 'A profile name is required.' });
+    try {
+      const current = await getUserByAuthUserId(security.userId);
+      if (!current) return res.status(404).json({ success: false, error: 'Application profile not found.' });
+      const saved = await upsertUser({ ...current, name, phone });
+      return res.json({ success: true, data: saved });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, error: error?.message || 'Unable to save profile to database.' });
     }
   });
 
@@ -297,7 +316,7 @@ export function createApp() {
   // Get all user accounts (Super Admin only)
   app.get('/api/accounts', async (req, res) => {
     const user = getUserSecurityContext(req);
-    if (!user.isSuperAdmin) {
+    if (!user.isAdmin) {
       return res.status(403).json({ success: false, error: 'You do not have permission to access this resource.' });
     }
 
@@ -316,7 +335,7 @@ export function createApp() {
 
   app.get('/api/users', async (req, res) => {
     const user = getUserSecurityContext(req);
-    if (!user.isSuperAdmin) {
+    if (!user.isAdmin) {
       return res.status(403).json({ success: false, error: 'You do not have permission to access this resource.' });
     }
     try {
@@ -327,10 +346,22 @@ export function createApp() {
     }
   });
 
-  // Create or Update user account (Super Admin only)
+  const inviteAuthUser = async (email: string, metadata: Record<string, unknown>) => {
+    if (!supabaseAdminClient) throw new Error('SUPABASE_SERVICE_ROLE_KEY is required for account invitations.');
+    const { data: usersPage, error: listError } = await supabaseAdminClient.auth.admin.listUsers({ page: 1, perPage: 1000 });
+    if (listError) throw listError;
+    const existingAuthUser = (usersPage.users as Array<{ id: string; email?: string | null }>)
+      .find(user => user.email?.toLowerCase() === email.toLowerCase());
+    if (existingAuthUser) return existingAuthUser.id;
+    const { data, error } = await supabaseAdminClient.auth.admin.inviteUserByEmail(email, { data: metadata });
+    if (error || !data.user) throw error || new Error('Supabase Auth did not return the invited user.');
+    return data.user.id;
+  };
+
+  // Create or update profile and invite through Supabase Auth.
   app.post('/api/accounts', async (req, res) => {
     const admin = getUserSecurityContext(req);
-    if (!admin.isSuperAdmin) {
+    if (!admin.isAdmin) {
       return res.status(403).json({ success: false, error: 'You do not have permission to access this resource.' });
     }
 
@@ -340,40 +371,83 @@ export function createApp() {
     }
 
     try {
-      const saved = await upsertUser(payload);
+      const email = String(payload.email).trim().toLowerCase();
+      const role = String(payload.role || 'focal');
+      if (!['super_admin', 'admin', 'focal', 'agent'].includes(role)) {
+        return res.status(400).json({ success: false, error: 'Unsupported user role.' });
+      }
+      if (role === 'super_admin' && !admin.isSuperAdmin) {
+        return res.status(403).json({ success: false, error: 'Only a Super Admin can create another Super Admin.' });
+      }
+      const existingProfile = await getUserByUsernameOrEmail(email);
+      const authUserId = existingProfile?.authUserId || await inviteAuthUser(email, {
+        username: payload.username || email.split('@')[0],
+        full_name: payload.name || payload.fullName || '',
+      });
+      const saved = await upsertUser({
+        ...payload,
+        id: existingProfile?.id || payload.id || `usr-${Date.now()}`,
+        email,
+        authUserId,
+        status: payload.active === false ? 'inactive' : 'active',
+        active: payload.active !== false,
+      });
       return res.status(201).json({ success: true, data: saved });
     } catch (err: any) {
       console.error('Error creating user account:', err);
-      return res.status(500).json({ success: false, error: 'Failed to save user account to database.' });
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to save user account to database.' });
     }
   });
 
   app.put('/api/accounts/:id', async (req, res) => {
     const admin = getUserSecurityContext(req);
-    if (!admin.isSuperAdmin) {
+    if (!admin.isAdmin) {
       return res.status(403).json({ success: false, error: 'You do not have permission to access this resource.' });
     }
 
     const { id } = req.params;
-    const payload = { ...req.body, id };
-
     try {
+      const current = await getUserByUsernameOrEmail(id);
+      if (!current) return res.status(404).json({ success: false, error: 'User profile not found.' });
+      if (current.role === 'super_admin' && !admin.isSuperAdmin) {
+        return res.status(403).json({ success: false, error: 'Only a Super Admin can modify a Super Admin account.' });
+      }
+      const payload = { ...req.body, id, authUserId: current.authUserId };
+      if (!current.authUserId) {
+        payload.authUserId = await inviteAuthUser(String(payload.email || current.email).trim().toLowerCase(), {
+          username: payload.username || current.username,
+          full_name: payload.name || payload.fullName || current.name,
+        });
+      } else if (payload.email && payload.email.toLowerCase() !== current.email.toLowerCase()) {
+        if (!supabaseAdminClient) return res.status(503).json({ success: false, error: 'Supabase Auth administration is not configured.' });
+        const { error } = await supabaseAdminClient.auth.admin.updateUserById(current.authUserId, { email: payload.email });
+        if (error) throw error;
+      }
+      payload.status = payload.active === false ? 'inactive' : 'active';
       const saved = await upsertUser(payload);
       return res.json({ success: true, data: saved });
     } catch (err: any) {
       console.error('Error updating user account:', err);
-      return res.status(500).json({ success: false, error: 'Failed to update user account in database.' });
+      return res.status(500).json({ success: false, error: err?.message || 'Failed to update user account in database.' });
     }
   });
 
   app.delete('/api/accounts/:id', async (req, res) => {
     const admin = getUserSecurityContext(req);
-    if (!admin.isSuperAdmin) {
+    if (!admin.isAdmin) {
       return res.status(403).json({ success: false, error: 'You do not have permission to access this resource.' });
     }
 
     const { id } = req.params;
     try {
+      const target = await getUserByUsernameOrEmail(id);
+      if (target?.role === 'super_admin' && !admin.isSuperAdmin) {
+        return res.status(403).json({ success: false, error: 'Only a Super Admin can remove a Super Admin account.' });
+      }
+      if (target?.authUserId && supabaseAdminClient) {
+        const { error } = await supabaseAdminClient.auth.admin.deleteUser(target.authUserId);
+        if (error) throw error;
+      }
       await deleteUserByUid(id);
       return res.json({ success: true, message: 'User account removed from database.' });
     } catch (err: any) {
@@ -406,10 +480,10 @@ export function createApp() {
       return res.status(403).json({ success: false, error: 'You do not have permission to access this resource.' });
     }
     try {
-      let value = await getStoredSystemSetting(req.params.key);
-      if (value === null && req.params.key === 'certificate_templates') {
-        value = await setSystemSetting(req.params.key, INITIAL_CERTIFICATE_TEMPLATES);
+      if (req.params.key === 'certificate_templates') {
+        return res.json({ success: true, data: await getCertificateTemplates() });
       }
+      let value = await getStoredSystemSetting(req.params.key);
       return res.json({ success: true, data: value ?? (sharedModuleArrayKeys.has(req.params.key) ? [] : {}) });
     } catch {
       return res.status(500).json({ success: false, error: 'Unable to load module data from database.' });
@@ -432,7 +506,12 @@ export function createApp() {
       return res.status(400).json({ success: false, error: 'This module data must be an object.' });
     }
     try {
-      const saved = await setSystemSetting(req.params.key, req.body.data);
+      const saved = req.params.key === 'certificate_templates'
+        ? await saveCertificateTemplates(req.body.data)
+        : await setSystemSetting(req.params.key, req.body.data);
+      if (req.params.key === 'certificate_templates') {
+        return res.json({ success: true, data: saved });
+      }
       const confirmed = await getStoredSystemSetting(req.params.key);
       if (confirmed === null) throw new Error('Database did not return the saved module data.');
       return res.json({ success: true, data: confirmed ?? saved });
@@ -1290,12 +1369,33 @@ export function createApp() {
     try {
       const saved = await upsertCertificate({
         ...cert,
+        metadata: {
+          ...(cert.metadata || {}),
+          ...cert,
+          createdBy: user.userId,
+          createdByRole: user.role,
+        },
         id: cert.id || `cert-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       });
       return res.status(201).json({ success: true, data: saved });
     } catch (err: any) {
       console.error('Error issuing certificate:', err);
       return res.status(500).json({ success: false, error: 'Failed to issue certificate to database.' });
+    }
+  });
+
+  app.delete('/api/certificates/:controlNumber', async (req, res) => {
+    const user = getUserSecurityContext(req);
+    if (!user.isAdmin) {
+      return res.status(403).json({ success: false, error: 'Only administrators can archive certificates.' });
+    }
+    try {
+      const archived = await archiveCertificateByControlNumber(req.params.controlNumber);
+      if (!archived) return res.status(404).json({ success: false, error: 'Certificate not found.' });
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error('Error archiving certificate:', err);
+      return res.status(500).json({ success: false, error: 'Unable to archive certificate in database.' });
     }
   });
 

@@ -10,6 +10,11 @@ import {
 } from '../types.ts';
 import type { LandingCmsConfig } from '../types/landingCms.ts';
 import { storageService } from './storageService.ts';
+import { supabase } from '../lib/supabase.ts';
+
+supabase?.auth.onAuthStateChange((_event, session) => {
+  storageService.setSessionToken(session?.access_token || null);
+});
 
 function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
@@ -53,6 +58,14 @@ export const authApi = {
     if (!data.token || typeof data.token !== 'string') {
       throw new Error('Authentication service returned no session token.');
     }
+    if (!supabase || !data.refreshToken) {
+      throw new Error('Supabase Auth client is not configured for session persistence.');
+    }
+    const { error: sessionError } = await supabase.auth.setSession({
+      access_token: data.token,
+      refresh_token: data.refreshToken,
+    });
+    if (sessionError) throw sessionError;
     storageService.setSessionToken(data.token);
     try {
       await storageService.refreshRegistryFormSchemaFromCloud();
@@ -61,6 +74,46 @@ export const authApi = {
       throw error;
     }
     return { user: data.user, role: data.role, assignedBarangay: data.assignedBarangay, token: data.token };
+  },
+
+  async restoreSession(): Promise<UserAccount | null> {
+    if (!supabase) return null;
+    const { data, error } = await supabase.auth.getSession();
+    if (error || !data.session) return null;
+    storageService.setSessionToken(data.session.access_token);
+    const res = await fetch('/api/auth/profile', { headers: getAuthHeaders() });
+    const result = await res.json().catch(() => null);
+    if (!res.ok || !result?.success) {
+      await supabase.auth.signOut();
+      storageService.setSessionToken(null);
+      throw new Error(result?.error || 'Unable to load the current database profile.');
+    }
+    return result.data as UserAccount;
+  },
+
+  async updateProfile(profile: Pick<UserAccount, 'name' | 'phone'>): Promise<UserAccount> {
+    const res = await fetch('/api/auth/profile', {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(profile),
+    });
+    const result = await res.json().catch(() => null);
+    if (!res.ok || !result?.success) throw new Error(result?.error || 'Unable to save profile to database.');
+    return result.data as UserAccount;
+  },
+
+  async changePassword(email: string, currentPassword: string, newPassword: string): Promise<void> {
+    if (!supabase) throw new Error('Supabase Auth client is not configured.');
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password: currentPassword });
+    if (signInError) throw new Error('Current password is incorrect.');
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+  },
+
+  async logout(): Promise<void> {
+    await supabase?.auth.signOut();
+    storageService.setSessionToken(null);
+    storageService.setCurrentUser(null);
   },
 };
 
@@ -257,6 +310,17 @@ export const certificatesApi = {
       throw new Error(data?.error || 'Unable to save certificate to database.');
     }
     return data.data;
+  },
+
+  async archive(controlNumber: string): Promise<void> {
+    const res = await fetch(`/api/certificates/${encodeURIComponent(controlNumber)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || 'Unable to archive certificate in database.');
+    }
   },
 };
 

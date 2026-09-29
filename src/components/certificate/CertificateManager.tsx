@@ -47,9 +47,9 @@ import {
   IssuedCertificate,
   CertificateTypeDefinition,
   CertificateTemplate,
+  Barangay,
 } from '../../types';
-import { storageService } from '../../services/storageService';
-import { moduleDataApi } from '../../services/api';
+import { certificatesApi, moduleDataApi } from '../../services/api';
 import { HINUNANGAN_BARANGAYS } from '../../data/barangays';
 import {
   SealBagongPilipinas,
@@ -75,6 +75,7 @@ import { calculateSwineAge, formatDobDisplay } from '../../utils/swineRegistryLo
 
 interface CertificateManagerProps {
   swineList: SwineRecord[];
+  barangays: Barangay[];
   currentUser: UserAccount | null;
   selectedSwineInitial?: SwineRecord | null;
 }
@@ -240,10 +241,11 @@ interface ColumnConfig {
 
 export const CertificateManager: React.FC<CertificateManagerProps> = ({
   swineList,
+  barangays,
   currentUser,
   selectedSwineInitial,
 }) => {
-  const isUserAdmin = currentUser?.role === 'admin';
+  const isUserAdmin = currentUser?.role === 'admin' || currentUser?.role === 'super_admin';
   const userAssignedBarangay = currentUser?.assignedBarangay || '';
   const userBarangayId = currentUser?.barangay_id || '';
 
@@ -340,7 +342,12 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
 
   useEffect(() => {
     moduleDataApi.get<CertificateTemplate[]>('certificate_templates')
-      .then(savedTemplates => setTemplates(savedTemplates))
+      .then(savedTemplates => {
+        setTemplates(savedTemplates);
+        setSelectedTemplateId(current => savedTemplates.some(template => template.id === current)
+          ? current
+          : savedTemplates[0]?.id || '');
+      })
       .catch(error => console.error('Unable to load report templates from database:', error));
   }, []);
 
@@ -410,9 +417,7 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
   });
 
   // Issued Certificates Archive
-  const [issuedCertificates, setIssuedCertificates] = useState<IssuedCertificate[]>(() =>
-    storageService.getIssuedCertificates(currentUser)
-  );
+  const [issuedCertificates, setIssuedCertificates] = useState<IssuedCertificate[]>([]);
   const [archiveSearchQuery, setArchiveSearchQuery] = useState('');
   const [certToDelete, setCertToDelete] = useState<IssuedCertificate | null>(null);
 
@@ -422,6 +427,21 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
 
   const printableReportRef = useRef<HTMLDivElement>(null);
   const biosecurityReportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => certificatesApi.getAll().then(records => {
+      if (active) setIssuedCertificates(records);
+    }).catch(error => {
+      if (active) setExportNotice(error instanceof Error ? error.message : 'Unable to load issued certificates from database.');
+    });
+    void refresh();
+    const intervalId = window.setInterval(() => { void refresh(); }, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [currentUser?.id]);
 
   // If selectedSwineInitial changes, sync farmer details
   useEffect(() => {
@@ -699,7 +719,10 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
   };
 
   const handleCertificateIssuedFromModal = (cert: IssuedCertificate, printNow = false) => {
-    setIssuedCertificates(storageService.getIssuedCertificates(currentUser));
+    setIssuedCertificates(previous => [cert, ...previous.filter(item => item.id !== cert.id)]);
+    certificatesApi.getAll().then(setIssuedCertificates).catch(error => {
+      setExportNotice(error instanceof Error ? error.message : 'Certificate was saved, but the archive could not be refreshed.');
+    });
     setActiveCertData({
       templateStyle: 'nava',
       barangay: cert.farmerBarangay || cert.issuingBarangay || 'Nava',
@@ -724,18 +747,22 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
     }
   };
 
-  const handleDeleteCertificate = (certNo: string) => {
+  const handleDeleteCertificate = async (certNo: string) => {
     if (confirm('Are you sure you want to delete this issued certificate record?')) {
-      storageService.deleteIssuedCertificate(certNo);
-      setIssuedCertificates(storageService.getIssuedCertificates(currentUser));
-      setExportNotice('Certificate record deleted.');
-      setTimeout(() => setExportNotice(null), 2500);
+      try {
+        await certificatesApi.archive(certNo);
+        setIssuedCertificates(await certificatesApi.getAll());
+        setExportNotice('Certificate archived.');
+        setTimeout(() => setExportNotice(null), 2500);
+      } catch (error) {
+        setExportNotice(error instanceof Error ? error.message : 'Unable to archive certificate.');
+      }
     }
   };
 
   // Official Certificate Report dataset
   const officialReportRecords = useMemo(() => {
-    let list = storageService.getIssuedCertificates(currentUser);
+    let list = issuedCertificates;
     if (reportBarangayFilter && reportBarangayFilter !== 'all') {
       list = list.filter(
         c =>
@@ -870,15 +897,6 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
   };
 
   const handleViewCertificate = (cert: IssuedCertificate) => {
-    const check = storageService.checkCertificateAccess(cert.certificateNo, currentUser);
-    if (!check.authorized) {
-      setAccessDeniedMessage(
-        check.error ||
-          `Access Denied: You are not authorized to view Certificate #${cert.certificateNo}. It belongs to Barangay ${cert.farmerBarangay || cert.issuingBarangay}. Under municipal security protocol, only authorized personnel for that barangay or Municipal Administrators may access this document.`
-      );
-      return;
-    }
-
     if (cert.templateSnapshot) {
       setSelectedTemplateId(cert.templateSnapshot.id);
     } else if (cert.templateId) {
@@ -2189,6 +2207,7 @@ export const CertificateManager: React.FC<CertificateManagerProps> = ({
         isOpen={isCreateCertModalOpen}
         onClose={() => setIsCreateCertModalOpen(false)}
         swineList={swineList}
+        barangays={barangays}
         currentUser={currentUser}
         onCertificateIssued={handleCertificateIssuedFromModal}
         initialData={{

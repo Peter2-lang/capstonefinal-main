@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { UserAccount, SwineRecord, Barangay } from '../../types';
 import { storageService } from '../../services/storageService';
+import { authApi } from '../../services/api';
 
 interface UserAccountViewProps {
   currentUser: UserAccount | null;
@@ -67,38 +68,32 @@ export const UserAccountView: React.FC<UserAccountViewProps> = ({
     return barangaySwine.filter(s => (s.healthStatus || 'healthy').toLowerCase() === 'healthy').length;
   }, [barangaySwine]);
 
-  const handleUpdateProfile = (e: React.FormEvent) => {
+  const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
-
-    const updated: UserAccount = {
-      ...currentUser,
-      name: name.trim() || currentUser.name,
-      phone: phone.trim() || currentUser.phone,
-    };
-
-    storageService.saveUserAccount(updated);
-    storageService.setCurrentUser(updated);
-    if (onUpdateUser) onUpdateUser(updated);
-
-    setProfileSuccess(true);
-    setTimeout(() => setProfileSuccess(false), 3000);
+    try {
+      const updated = await authApi.updateProfile({
+        name: name.trim() || currentUser.name,
+        phone: phone.trim() || currentUser.phone || '',
+      });
+      storageService.setCurrentUser(updated, true);
+      if (onUpdateUser) onUpdateUser(updated);
+      setProfileSuccess(true);
+      setTimeout(() => setProfileSuccess(false), 3000);
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : 'Unable to save profile.');
+    }
   };
 
-  const handleChangePassword = (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setPasswordError('');
     setPasswordSuccess(false);
 
     if (!currentUser) return;
 
-    if (currentUser.password && currentPassword !== currentUser.password) {
-      setPasswordError('Current password does not match.');
-      return;
-    }
-
-    if (newPassword.length < 4) {
-      setPasswordError('New password must be at least 4 characters long.');
+    if (newPassword.length < 12) {
+      setPasswordError('New password must be at least 12 characters long.');
       return;
     }
 
@@ -107,20 +102,16 @@ export const UserAccountView: React.FC<UserAccountViewProps> = ({
       return;
     }
 
-    const updated: UserAccount = {
-      ...currentUser,
-      password: newPassword,
-    };
-
-    storageService.saveUserAccount(updated);
-    storageService.setCurrentUser(updated);
-    if (onUpdateUser) onUpdateUser(updated);
-
-    setCurrentPassword('');
-    setNewPassword('');
-    setConfirmPassword('');
-    setPasswordSuccess(true);
-    setTimeout(() => setPasswordSuccess(false), 4000);
+    try {
+      await authApi.changePassword(currentUser.email, currentPassword, newPassword);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setPasswordSuccess(true);
+      setTimeout(() => setPasswordSuccess(false), 4000);
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : 'Unable to change password through Supabase Auth.');
+    }
   };
 
   const isFocal = currentUser?.role === 'focal';

@@ -138,9 +138,8 @@ function createMemPool() {
  *   DATABASE_URL is REQUIRED.
  *   Supabase PostgreSQL is used.
  *
- * LOCAL DEVELOPMENT:
- *   DATABASE_URL -> PostgreSQL/Supabase
- *   No DATABASE_URL -> pg-mem
+ * DEVELOPMENT:
+ *   DATABASE_URL is REQUIRED; no embedded database fallback is permitted.
  */
 export const createPool = () => {
   // Reuse an existing pool.
@@ -227,18 +226,7 @@ export const createPool = () => {
     return global._postgresPool;
   }
 
-  // =========================================================
-  // LOCAL DEVELOPMENT WITHOUT DATABASE_URL
-  // =========================================================
-
-  console.log(
-    '⚡ DATABASE_URL not configured locally. Using embedded pg-mem database.'
-  );
-
-  global._postgresPool = createMemPool();
-  global._isPgMem = true;
-
-  return global._postgresPool;
+  throw new Error('DATABASE_URL is required. Configure the shared PostgreSQL database; local in-memory persistence is disabled.');
 };
 
 /**
@@ -516,14 +504,17 @@ export async function initPostgresTables(): Promise<boolean> {
         -- =====================================================
 
         CREATE TABLE IF NOT EXISTS users (
-          id SERIAL PRIMARY KEY,
+          id UUID PRIMARY KEY,
           uid TEXT NOT NULL UNIQUE,
           email TEXT NOT NULL,
           name TEXT,
           role TEXT NOT NULL DEFAULT 'focal',
           assigned_barangay TEXT,
           phone TEXT,
-          password TEXT,
+          auth_user_id UUID,
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
+          status TEXT NOT NULL DEFAULT 'active',
           created_at TIMESTAMP DEFAULT now()
         );
 
@@ -545,8 +536,19 @@ export async function initPostgresTables(): Promise<boolean> {
         ALTER TABLE users
           ADD COLUMN IF NOT EXISTS phone TEXT;
 
+        ALTER TABLE users DROP COLUMN IF EXISTS password;
+
         ALTER TABLE users
-          ADD COLUMN IF NOT EXISTS password TEXT;
+          ADD COLUMN IF NOT EXISTS auth_user_id UUID;
+
+        ALTER TABLE users
+          ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+
+        ALTER TABLE users
+          ADD COLUMN IF NOT EXISTS permissions JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+        ALTER TABLE users
+          ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
 
         ALTER TABLE users
           ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT now();
@@ -682,6 +684,7 @@ export async function initPostgresTables(): Promise<boolean> {
           qr_payload TEXT,
           valid_until TEXT,
           status TEXT NOT NULL DEFAULT 'VALID',
+          metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
           created_at TIMESTAMP DEFAULT now()
         );
 
@@ -718,6 +721,9 @@ export async function initPostgresTables(): Promise<boolean> {
         ALTER TABLE issued_certificates
           ADD COLUMN IF NOT EXISTS status TEXT
           DEFAULT 'VALID';
+
+        ALTER TABLE issued_certificates
+          ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 
         ALTER TABLE issued_certificates
           ADD COLUMN IF NOT EXISTS created_at TIMESTAMP

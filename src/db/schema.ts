@@ -1,14 +1,17 @@
 import { boolean, integer, jsonb, pgTable, serial, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
-  id: serial('id').primaryKey(),
+  id: uuid('id').primaryKey(),
   uid: text('uid').notNull().unique(),
   email: text('email').notNull(),
   name: text('name'),
   role: text('role').notNull().default('focal'),
   assignedBarangay: text('assigned_barangay'),
   phone: text('phone'),
-  password: text('password'),
+  authUserId: uuid('auth_user_id'),
+  active: boolean('active').notNull().default(true),
+  permissions: jsonb('permissions').notNull().default([]),
+  status: text('status').notNull().default('active'),
   createdAt: timestamp('created_at').defaultNow(),
 });
 
@@ -53,6 +56,7 @@ export const issuedCertificates = pgTable('issued_certificates', {
   qrPayload: text('qr_payload'),
   validUntil: text('valid_until'),
   status: text('status').notNull().default('VALID'),
+  metadata: jsonb('metadata').notNull().default({}),
   createdAt: timestamp('created_at').defaultNow(),
 });
 

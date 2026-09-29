@@ -20,7 +20,6 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('focal');
   const [assignedBarangay, setAssignedBarangay] = useState(barangays[0]?.name || 'Poblacion');
   const [contactNo, setContactNo] = useState('');
@@ -36,7 +35,6 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
     setName(u.name);
     setUsername(u.username);
     setEmail(u.email);
-    setPassword('');
     setRole(u.role);
     setAssignedBarangay(u.assignedBarangay || barangays[0]?.name || 'Poblacion');
     setContactNo(u.contactNo || '');
@@ -49,7 +47,6 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
     setName('');
     setUsername('');
     setEmail('');
-    setPassword('hinunangan2025');
     setRole('focal');
     setAssignedBarangay(barangays[0]?.name || 'Poblacion');
     setContactNo('');
@@ -71,7 +68,6 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
         name: name.trim(),
         username: username.trim().toLowerCase(),
         email: email.trim().toLowerCase(),
-        ...(password.trim() ? { password: password.trim() } : {}),
         role,
         assignedBarangay: role === 'focal' ? assignedBarangay : undefined,
         contactNo: contactNo.trim(),
@@ -86,7 +82,6 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
         name: name.trim(),
         username: username.trim().toLowerCase(),
         email: email.trim().toLowerCase(),
-        ...(password.trim() ? { password: password.trim() } : {}),
         role,
         assignedBarangay: role === 'focal' ? assignedBarangay : undefined,
         contactNo: contactNo.trim(),
@@ -203,17 +198,6 @@ export const ManageAccounts: React.FC<ManageAccountsProps> = ({ users, barangays
                 onChange={e => setEmail(e.target.value)}
                 placeholder="e.g. roland@hinunangan.gov.ph"
                 className="w-full px-3 py-2 rounded-lg border border-stone-300 focus:ring-2 focus:ring-emerald-600 focus:outline-hidden"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-stone-700 mb-1">Password</label>
-              <input
-                type="text"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="Initial password"
-                className="w-full px-3 py-2 rounded-lg border border-stone-300 font-mono focus:ring-2 focus:ring-emerald-600 focus:outline-hidden"
               />
             </div>
 

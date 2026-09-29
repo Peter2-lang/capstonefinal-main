@@ -8,7 +8,7 @@ import { SuperAdminAuth } from './components/auth/SuperAdminAuth';
 import { AccessDenied403 } from './components/admin/media/AccessDenied403';
 import { hasPermission, isSuperAdminOnlyTab } from './utils/rbacPermissions';
 import { storageService } from './services/storageService';
-import { accountsApi, barangaysApi } from './services/api';
+import { accountsApi, authApi, barangaysApi } from './services/api';
 import { landingCmsService } from './services/landingCmsService';
 import { BackgroundPhotoConfig } from './types/landingCms';
 import { Barangay, LandingPageConfig, SwineRecord, UserAccount, UserRole } from './types';
@@ -52,11 +52,8 @@ const ViewLoader: React.FC = () => (
 );
 
 export default function App() {
-  const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => storageService.getCurrentUser());
-  const [currentRole, setCurrentRole] = useState<UserRole | 'landing'>(() => {
-    const user = storageService.getCurrentUser();
-    return user ? user.role : 'landing';
-  });
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [currentRole, setCurrentRole] = useState<UserRole | 'landing'>('landing');
   const isSuperAdmin = currentUser?.role === 'super_admin' || currentRole === 'super_admin';
   const isAdmin = currentUser?.role === 'admin' || currentRole === 'admin' || isSuperAdmin;
   const { fontStyle, colors, roleConfig } = useRoleTheme(currentRole);
@@ -165,6 +162,19 @@ export default function App() {
   // Unread messages count
   const [unreadCount, setUnreadCount] = useState<number>(0);
 
+  useEffect(() => {
+    let active = true;
+    authApi.restoreSession().then(user => {
+      if (!active || !user) return;
+      storageService.setCurrentUser(user, true);
+      setCurrentUser(user);
+      setCurrentRole(user.role);
+    }).catch(error => {
+      console.error('Unable to restore Supabase Auth profile:', error);
+    });
+    return () => { active = false; };
+  }, []);
+
   const refreshAllData = async () => {
     setLandingConfig(storageService.getLandingConfig());
 
@@ -183,7 +193,7 @@ export default function App() {
       setBarangays([]);
     }
 
-    if (currentUser?.role === 'super_admin') {
+    if (currentUser?.role === 'super_admin' || currentUser?.role === 'admin') {
       try {
         setAccounts(await accountsApi.getAll());
       } catch (error) {
@@ -394,6 +404,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    void authApi.logout();
     setCurrentRole('landing');
     setCurrentUser(null);
     storageService.setCurrentUser(null as any);
@@ -818,6 +829,7 @@ export default function App() {
             {activeTab === 'certificate' && (
               <CertificateManager
                 swineList={swineList}
+                barangays={barangays}
                 currentUser={currentUser}
                 selectedSwineInitial={certificateSwine}
               />

@@ -1,5 +1,6 @@
 import { db } from './index.ts';
 import { issuedCertificates } from './schema.ts';
+import { eq } from 'drizzle-orm';
 
 export function mapCertToDb(c: any) {
   return {
@@ -15,11 +16,13 @@ export function mapCertToDb(c: any) {
     qrPayload: c.qrPayload || '',
     validUntil: c.validUntil || '',
     status: (c.status || 'VALID').toUpperCase(),
+    metadata: c.metadata || c,
   };
 }
 
 export function mapDbToCert(row: any) {
   return {
+    ...(row.metadata || {}),
     id: row.id,
     certificateNo: row.controlNumber,
     controlNumber: row.controlNumber,
@@ -78,4 +81,13 @@ export async function upsertCertificate(cert: any) {
     console.error('Database query failed for upsertCertificate:', error);
     throw new Error('Database query failed. Please try again later.', { cause: error });
   }
+}
+
+export async function archiveCertificateByControlNumber(controlNumber: string): Promise<boolean> {
+  const result = await db
+    .update(issuedCertificates)
+    .set({ status: 'ARCHIVED' })
+    .where(eq(issuedCertificates.controlNumber, controlNumber))
+    .returning({ id: issuedCertificates.id });
+  return result.length > 0;
 }

@@ -19,10 +19,9 @@ import {
   Sliders,
   Layers,
 } from 'lucide-react';
-import { SwineRecord, UserAccount, IssuedCertificate, CertificateTemplate } from '../../types';
-import { HINUNANGAN_BARANGAYS } from '../../data/barangays';
+import { Barangay, SwineRecord, UserAccount, IssuedCertificate, CertificateTemplate } from '../../types';
 import { DynamicCertificateView } from './DynamicCertificateView';
-import { storageService } from '../../services/storageService';
+import { certificatesApi, moduleDataApi } from '../../services/api';
 import { replaceTemplatePlaceholders } from '../../utils/templateReplacer';
 import { calculateSwineAge } from '../../utils/swineRegistryLogic';
 
@@ -30,6 +29,7 @@ interface CreateCertificateModalProps {
   isOpen: boolean;
   onClose: () => void;
   swineList: SwineRecord[];
+  barangays: Barangay[];
   currentUser: UserAccount | null;
   onCertificateIssued: (cert: IssuedCertificate, printNow?: boolean) => void;
   initialData?: any;
@@ -39,28 +39,26 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
   isOpen,
   onClose,
   swineList,
+  barangays,
   currentUser,
   onCertificateIssued,
   initialData,
 }) => {
-  const allTemplates = useMemo(() => storageService.getCertificateTemplates(), [isOpen]);
+  const [allTemplates, setAllTemplates] = useState<CertificateTemplate[]>([]);
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   const [selectedBarangay, setSelectedBarangay] = useState<string>(
-    initialData?.barangay || 'Nava'
+    initialData?.barangay || currentUser?.assignedBarangay || barangays[0]?.name || ''
   );
 
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(() => {
-    if (initialData?.templateId) return initialData.templateId;
-    const matched = storageService.getCertificateTemplateForBarangay(initialData?.barangay || 'Nava');
-    return matched.id;
-  });
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(initialData?.templateId || '');
 
   const activeTemplate = useMemo(() => {
-    return (
-      allTemplates.find(t => t.id === selectedTemplateId) ||
-      storageService.getCertificateTemplateForBarangay(selectedBarangay) ||
-      allTemplates[0]
-    );
+    return allTemplates.find(t => t.id === selectedTemplateId) ||
+      allTemplates.find(t => t.isActive && (t.barangay === 'All' || t.barangay.toLowerCase() === selectedBarangay.toLowerCase())) ||
+      allTemplates.find(t => t.isActive) || allTemplates[0] || null;
   }, [allTemplates, selectedTemplateId, selectedBarangay]);
 
   // Form Field States
@@ -105,10 +103,10 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
     initialData?.priceDescription || (initialData?.estimatedPricePhp ? `₱${initialData.estimatedPricePhp.toLocaleString()}` : '')
   );
   const [orNumber, setOrNumber] = useState<string>(
-    initialData?.orNumber || activeTemplate.receipt?.orNumber || `OR-${Math.floor(1000000 + Math.random() * 9000000)}`
+    initialData?.orNumber || activeTemplate?.receipt?.orNumber || `OR-${Math.floor(1000000 + Math.random() * 9000000)}`
   );
   const [amountPaid, setAmountPaid] = useState<string | number>(
-    initialData?.amountPaid || activeTemplate.receipt?.amountPaid || '100.00'
+    initialData?.amountPaid || activeTemplate?.receipt?.amountPaid || '100.00'
   );
   const [issueDate, setIssueDate] = useState<string>(
     initialData?.issueDate || new Date().toISOString().substring(0, 10)
@@ -117,20 +115,45 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
   // Modal active tab: 'form' | 'preview'
   const [activeTab, setActiveTab] = useState<'form' | 'preview'>('form');
 
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    setIsLoadingTemplates(true);
+    setSaveError('');
+    moduleDataApi.get<CertificateTemplate[]>('certificate_templates').then(templates => {
+      if (!active) return;
+      setAllTemplates(templates);
+      const preferred = templates.find(template => template.id === initialData?.templateId) ||
+        templates.find(template => template.isActive && (template.barangay === 'All' || template.barangay.toLowerCase() === selectedBarangay.toLowerCase())) ||
+        templates.find(template => template.isActive) || templates[0];
+      if (preferred) setSelectedTemplateId(preferred.id);
+    }).catch(error => {
+      if (active) setSaveError(error instanceof Error ? error.message : 'Unable to load certificate templates from database.');
+    }).finally(() => {
+      if (active) setIsLoadingTemplates(false);
+    });
+    return () => { active = false; };
+  }, [isOpen, initialData?.templateId]);
+
+  useEffect(() => {
+    if (!selectedBarangay && barangays.length > 0) setSelectedBarangay(barangays[0].name);
+  }, [barangays, selectedBarangay]);
+
   // When barangay changes, auto-suggest template if user hasn't explicitly locked another
   useEffect(() => {
-    const matched = storageService.getCertificateTemplateForBarangay(selectedBarangay);
+    const matched = allTemplates.find(template => template.isActive &&
+      (template.barangay === 'All' || template.barangay.toLowerCase() === selectedBarangay.toLowerCase()));
     if (matched && matched.id !== selectedTemplateId) {
       setSelectedTemplateId(matched.id);
     }
-  }, [selectedBarangay]);
+  }, [allTemplates, selectedBarangay]);
 
   // When template changes, update receipt defaults
   useEffect(() => {
-    if (activeTemplate.receipt?.amountPaid && !initialData?.amountPaid) {
+    if (activeTemplate?.receipt?.amountPaid && !initialData?.amountPaid) {
       setAmountPaid(activeTemplate.receipt.amountPaid);
     }
-    if (activeTemplate.receipt?.orNumber && !initialData?.orNumber) {
+    if (activeTemplate?.receipt?.orNumber && !initialData?.orNumber) {
       setOrNumber(activeTemplate.receipt.orNumber);
     }
   }, [activeTemplate]);
@@ -158,6 +181,17 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
 
   if (!isOpen) return null;
 
+  if (!activeTemplate) {
+    return (
+      <div role="alert" className="fixed inset-0 z-50 grid place-items-center bg-slate-950/70 p-4 text-white">
+        <div className="max-w-md space-y-4 rounded-lg bg-slate-900 p-6">
+          <p>{isLoadingTemplates ? 'Loading certificate templates from database...' : saveError || 'No certificate templates are available.'}</p>
+          <button type="button" onClick={onClose} className="rounded border border-white/30 px-3 py-2">Close</button>
+        </div>
+      </div>
+    );
+  }
+
   // Active compiled data context for preview and placeholder replacement
   const activeDataContext = {
     resident_name: farmerName,
@@ -184,7 +218,18 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
     issued_at: `Barangay ${selectedBarangay}, Hinunangan, Southern Leyte`,
   };
 
-  const handleSaveAndIssue = (andPrint = false) => {
+  const handleSaveAndIssue = async (andPrint = false) => {
+    setSaveError('');
+    if (!farmerName.trim() || !selectedBarangay || !Number.isFinite(Number(numberOfHeads)) || Number(numberOfHeads) < 1) {
+      setSaveError('Enter a recipient, barangay, and a valid number of swine before issuing.');
+      return;
+    }
+    if (!barangays.some(barangay => barangay.name === selectedBarangay)) {
+      setSaveError('Select an active barangay loaded from the database.');
+      return;
+    }
+    setIsSaving(true);
+    try {
     const certNumber = `HN-BRGY-${selectedBarangay.substring(0, 3).toUpperCase()}-${Date.now().toString().slice(-6)}`;
     const renderedBody = replaceTemplatePlaceholders(activeTemplate.bodyTemplate || '', activeDataContext);
 
@@ -219,15 +264,30 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
       qrVerificationCode: `DA-HN-CERT|${certNumber}|${farmerName}|${selectedBarangay}|${numberOfHeads}HEADS|BUYER:${buyerName}|OR:${orNumber}|TPL:${activeTemplate.id}`,
     };
 
-    // Store in storageService
-    storageService.issueCertificate(newCert);
-    onCertificateIssued(newCert, andPrint);
-    onClose();
+      const savedCertificate = await certificatesApi.create({
+        ...newCert,
+        controlNumber: certNumber,
+        purpose: activeTemplate.documentType,
+        destination,
+        inspectedBy: currentUser?.name || firstBBO,
+        createdBy: currentUser?.id,
+        templateSnapshot: activeTemplate,
+        certificateData: activeDataContext,
+      });
+      onCertificateIssued(savedCertificate, andPrint);
+      onClose();
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Unable to save certificate to database.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
     <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 z-50 animate-in fade-in duration-150">
       <div className="bg-white max-w-5xl w-full rounded-2xl shadow-2xl border border-stone-200 flex flex-col max-h-[95vh] overflow-hidden">
+        {saveError && <div role="alert" className="border-b border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{saveError}</div>}
+        {isLoadingTemplates && <div role="status" className="px-4 py-2 text-xs text-stone-600">Loading templates from database...</div>}
         {/* Header (Picture 6 styling) */}
         <div className="px-6 py-4 border-b border-stone-200 flex items-center justify-between bg-slate-900 text-white">
           <div className="flex items-center gap-3">
@@ -354,7 +414,7 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
                       onChange={e => setSelectedBarangay(e.target.value)}
                       className="w-full bg-slate-50 border border-stone-300 rounded-xl p-2.5 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500"
                     >
-                      {HINUNANGAN_BARANGAYS.map(b => (
+                      {barangays.map(b => (
                         <option key={b.name} value={b.name}>
                           Barangay {b.name}
                         </option>
@@ -371,11 +431,7 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
                       onChange={e => handleFarmerSelect(e.target.value)}
                       className="w-full bg-slate-50 border border-stone-300 rounded-xl p-2.5 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500"
                     >
-                      <option value="EDNA TOMBOC">EDNA TOMBOC (Sample Raiser - Nava)</option>
-                      <option value="NUEVA ESPERANZA SLP ASS.">
-                        NUEVA ESPERANZA SLP ASS. (Association - Nueva Esperanza)
-                      </option>
-                      <option value="MARIBEL S. MENDOZA">MARIBEL S. MENDOZA (Tuburan)</option>
+                      <option value="">Select a registered raiser</option>
                       {swineList.slice(0, 30).map(s => (
                         <option key={s.id} value={s.farmerName}>
                           {s.farmerName} — Brgy. {s.barangay} ({s.breed})
@@ -643,15 +699,17 @@ export const CreateCertificateModal: React.FC<CreateCertificateModalProps> = ({
             <button
               type="button"
               onClick={() => handleSaveAndIssue(false)}
+              disabled={isSaving || isLoadingTemplates}
               className="px-5 py-2 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-black shadow-sm flex items-center gap-2 transition cursor-pointer"
             >
               <Check className="w-4 h-4" />
-              <span>Save & Issue Certificate</span>
+              <span>{isSaving ? 'Saving to database...' : 'Save & Issue Certificate'}</span>
             </button>
 
             <button
               type="button"
               onClick={() => handleSaveAndIssue(true)}
+              disabled={isSaving || isLoadingTemplates}
               className="px-5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-black shadow-sm flex items-center gap-2 transition cursor-pointer"
             >
               <Printer className="w-4 h-4" />
